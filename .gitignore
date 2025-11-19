@@ -33,3 +33,6 @@ Thumbs.db
 dist/
 build/
 
+# some notes
+FPGA_DESIGN_NOTES.md
+

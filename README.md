@@ -66,7 +66,8 @@ The accelerator implements a standard **Transformer Decoder inference pipeline**
 ├── software/               # Python Golden Models & Host Control
 │   ├── tokenizer.py        # BPE Tokenizer implementation (Logic verification)
 │   ├── embedding.py        # Weight extraction and embedding generation
-│   └── inference.py        # Main loop (Prefill + Decode logic)
+│   ├── self_attention.py   # Multi-head self-attention with GQA
+│   └── inference.py        # (Future) Main loop (Prefill + Decode logic)
 │
 ├── docs/                   # Design specifications and timeline
 ├── Qwen2.5-0.5B/          # Model files (config.json, model.safetensors, etc.)
@@ -99,13 +100,44 @@ Implements the **Byte Pair Encoding (BPE)** algorithm from scratch.
 Simulates the hardware memory read operation for the first layer.
 
 - **Input:** Token IDs
-- **Operation:** Fetches high-dimensional vectors (d=896 or 1024) from the `.safetensors` weight file
+- **Operation:** Fetches high-dimensional vectors (d=896) from the `.safetensors` weight file
 - **Output:** Matrix E⁰ passed to the Attention Mechanism
 
 **Features:**
 - Direct weight extraction from safetensors format
 - Configurable model directory paths
 - Dimension verification against config.json
+
+### 3. Self-Attention (`self_attention.py`)
+
+Implements multi-head self-attention with Grouped Query Attention (GQA) using barebone FPGA-oriented operations.
+
+- **Input:** Embedding vectors [Seq_Len, Hidden_Dim]
+- **Architecture:** 
+  - 14 Query attention heads
+  - 2 Key-Value heads (GQA for efficiency)
+  - 64-dimensional head size
+- **Operations:**
+  - RMS Normalization
+  - Q, K, V projections
+  - Scaled dot-product attention with causal masking
+  - Multi-head output concatenation
+- **Output:** Attention output [Seq_Len, Hidden_Dim]
+
+**FPGA Hardware Mapping:**
+- **MAC Units** - Vector dot products
+- **Systolic Arrays** - Matrix-vector multiplication
+- **Softmax Units** - Attention probability computation
+- **Parallel Adders/Multipliers** - Element-wise operations
+
+### 4. Integrated Pipeline (`integrated_pipeline.py`)
+
+Demonstrates the complete prefill stage by chaining all modules together.
+
+**Pipeline Flow:**
+```
+Text Input → Tokenization (CPU) → Embedding Lookup (CPU/Memory) → Self-Attention (FPGA)
+```
 
 ---
 
@@ -161,13 +193,23 @@ Shape: (2, 896)
 (Sequence Length: 2, Hidden Dimension: 896)
 ```
 
-#### Full Pipeline
+#### Running Self-Attention
 
-The embedding script automatically runs the full pipeline:
-1. Text input → Tokenization
-2. Token IDs → Embedding vectors
-3. Ready for accelerator's Prefill stage
+```bash
+python self_attention.py
+```
 
+This demonstrates multi-head self-attention with GQA, processing embeddings through the attention mechanism.
+
+**Example:**
+```bash
+$ python self_attention.py
+Enter text to process through self-attention: Hello world
+Input: 'Hello world'
+Token IDs: [9906, 1917]
+Embeddings shape: (2, 896)
+✓ Self-attention complete. Output shape: [2][896]
+```
 ---
 
 ## 📅 Project Roadmap
@@ -204,3 +246,9 @@ This is a senior design project. For questions or collaboration, please contact 
 ---
 
 **Status:** 🚧 In Active Development - Phase 1 (Software Prototyping)
+
+**Latest Progress:**
+- ✅ Tokenizer (BPE) implementation complete
+- ✅ Embedding layer complete
+- ✅ Self-Attention with Grouped Query Attention (GQA) complete
+- 🚧 Next: Feed-Forward Network (FFN) module

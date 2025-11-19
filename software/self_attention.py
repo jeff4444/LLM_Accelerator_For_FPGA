@@ -218,7 +218,7 @@ class SelfAttentionLayer:
         print(f"✓ Self-Attention Layer {layer_idx} initialized successfully\n")
     
     
-    def forward(self, x_seq, apply_norm=True):
+    def forward(self, x_seq, apply_norm=False):
         """
         THE SELF-ATTENTION FORWARD PASS
         
@@ -329,15 +329,11 @@ class SelfAttentionLayer:
                 # All heads are concatenated along the hidden dimension
                 for i in range(self.head_dim):
                     attn_output_seq[t_q][q_start + i] = head_context[i]
+                    
+        return attn_output_seq
         
-        # --- STEP 4: OUTPUT PROJECTION ---
-        print("Step 4: Applying output projection...")
-        # Linear projection: [Hidden_Size] -> [Hidden_Size]
-        attn_output = [mat_vec_mul(self.w_o, token) for token in attn_output_seq]
-        
-        print(f"✓ Self-attention complete. Output shape: [{seq_len}][{self.hidden_size}]")
-        
-        return attn_output
+    def output_projection(self, token):
+        return mat_vec_mul(self.w_o, token)
 
 
 # ==========================================
@@ -373,7 +369,9 @@ if __name__ == "__main__":
     
     print("STEP 3: Initializing Self-Attention Layer (Layer 0)...")
     print("-" * 80)
-    attention_layer = SelfAttentionLayer(layer_idx=0, model_dir=model_dir)
+    with open(os.path.join(model_dir, "config.json"), "r") as f:
+        config = json.load(f)
+    attention_layers = [SelfAttentionLayer(layer_idx=i, model_dir=model_dir) for i in range(config.get("num_hidden_layers"))]
     print(f"✓ Self-attention layer ready\n")
     
     # --- STEP 2: Process Input ---
@@ -399,30 +397,19 @@ if __name__ == "__main__":
     # Self-Attention
     print("STEP 7: Self-Attention Forward Pass")
     print("-" * 80)
-    attention_output = attention_layer.forward(embeddings, apply_norm=True)
+    for attention_layer in attention_layers:
+        embeddings = attention_layer.forward(embeddings, apply_norm=True)
+        
+    last_token = attention_layers[-1].output_projection(embeddings[-1])
     
-    # Convert back to check dimensions
-    if isinstance(attention_output, list):
-        seq_len = len(attention_output)
-        hidden_dim = len(attention_output[0])
-    else:
-        seq_len, hidden_dim = attention_output.shape
+    # now predict the next token
+    max_val = -float('inf')
+    max_id = -1
+    for i, val in enumerate(last_token):
+        if val > max_val:
+            max_val = val
+            max_id = i
     
+    print(f"Next token: {max_id}")
     print()
-    print("=" * 80)
-    print("PIPELINE COMPLETE")
-    print("=" * 80)
-    print(f"Input: '{user_input}'")
-    print(f"  → Tokenized to {len(token_ids)} tokens")
-    print(f"  → Embedded to [{embeddings.shape[0]}][{embeddings.shape[1]}]")
-    print(f"  → Self-attention output: [{seq_len}][{hidden_dim}]")
-    print(f"\n✓ Output ready for next layer (FFN) or decode stage!")
-    print()
-    
-    # Show sample values
-    print("Sample output values (first token, first 10 dimensions):")
-    if isinstance(attention_output, list):
-        print(f"  {attention_output[0][:10]}")
-    else:
-        print(f"  {attention_output[0][:10]}")
 

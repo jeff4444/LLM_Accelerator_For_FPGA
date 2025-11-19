@@ -197,6 +197,7 @@ class SelfAttentionLayer:
         
         # Load model weights
         print(f"Loading weights from {model_path}...")
+        self.model_path = model_path
         state_dict = load_file(model_path)
         
         # Weight key prefix for this layer
@@ -245,11 +246,6 @@ class SelfAttentionLayer:
         self.norm1_w = get_weight_matrix("input_layernorm", weight_type="")
         self.norm2_w = get_weight_matrix("post_attention_layernorm", weight_type="")
         print(f"Loaded norm weights (norm1_w and norm2_w)")
-        
-        # Convert Norm & Head
-        self.final_norm_w = state_dict["model.norm.weight"].tolist()
-        # print(state_dict.keys())
-        # self.lm_head_w = state_dict["lm_head.weight"].tolist()
         
         # Clean up
         del state_dict
@@ -448,6 +444,17 @@ class SelfAttentionLayer:
         """
         self.k_cache = None
         self.v_cache = None
+        
+    def get_lm_head_w_and_final_norm_w(self):
+        state_dict = load_file(self.model_path)
+        final_norm_w = state_dict["model.norm.weight"].tolist()
+        if "lm_head.weight" in state_dict:
+            lm_head_w = state_dict["lm_head.weight"].tolist()
+        elif "model.embed_tokens.weight" in state_dict:
+            lm_head_w = state_dict["model.embed_tokens.weight"].tolist()
+        else:
+            raise KeyError("Critical Error: Could not find output projection weights!")
+        return final_norm_w, lm_head_w
 
 
 # ==========================================
@@ -514,9 +521,11 @@ if __name__ == "__main__":
     for attention_layer in attention_layers:
         embeddings = attention_layer.forward(embeddings, apply_norm=True)
         
-    embeddings = [rms_norm_kernel(token, attention_layers[-1].final_norm_w) for token in embeddings]
+    final_norm_w, lm_head_w = attention_layers[-1].get_lm_head_w_and_final_norm_w()
+        
+    embeddings = [rms_norm_kernel(token, final_norm_w) for token in embeddings]
     last_token_vector = embeddings[-1]
-    # logits = mat_vec_mul(attention_layers[-1].lm_head_w, last_token_vector)
+    logits = mat_vec_mul(lm_head_w, last_token_vector)
         
     
     # now predict the next token

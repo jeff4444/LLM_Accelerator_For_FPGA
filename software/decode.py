@@ -2,11 +2,13 @@ import math
 import sys
 import os
 import random
+import numpy as np
 
 # Import your existing hardware primitives and layer
 from self_attention import (
     vec_dot, vec_add, vec_scale, mat_vec_mul, 
     softmax_kernel, rms_norm_kernel, silu_kernel, vec_mul,
+    apply_rotary_pos_emb,
     SelfAttentionLayer
 )
 from tokenizer import SimpleBPETokenizer
@@ -90,7 +92,7 @@ class DecodeSelfAttentionLayer(SelfAttentionLayer):
         
         # --- STEP 1: INPUT NORM ---
         if apply_norm and self.norm1_w is not None:
-            x_norm = rms_norm_kernel(x_token_embedding, self.norm1_w)
+            x_norm = rms_norm_kernel(x_token_embedding, self.norm1_w, eps=self.rms_norm_eps)
         else:
             x_norm = x_token_embedding
         
@@ -101,12 +103,35 @@ class DecodeSelfAttentionLayer(SelfAttentionLayer):
         k_new = mat_vec_mul(self.w_k, x_norm)   # [KV_Heads * Head_Dim]
         v_new = mat_vec_mul(self.w_v, x_norm)   # [KV_Heads * Head_Dim]
         
-        # --- STEP 3: KV CACHE UPDATE ---
-        # We must split k_new/v_new into heads and append to self.k_cache
-        
-        # Ensure cache exists (should be populated by Prefill)
+        # --- STEP 2.5: APPLY ROTARY POSITION EMBEDDINGS ---
+        # Position = current cache length (this is the new token's position)
         if self.k_cache is None or self.v_cache is None:
             raise ValueError("KV Cache is empty! Run prefill first.")
+        
+        current_position = len(self.k_cache[0])  # Cache length = position of new token
+        
+        # Apply RoPE to Q heads
+        q_new_rope = []
+        for q_head_idx in range(self.num_attention_heads):
+            q_start = q_head_idx * self.head_dim
+            q_end = q_start + self.head_dim
+            q_head = q_new[q_start:q_end]
+            q_head_rope = apply_rotary_pos_emb(q_head, current_position, self.head_dim, rope_theta=self.rope_theta)
+            q_new_rope.extend(q_head_rope)
+        q_new = q_new_rope
+        
+        # Apply RoPE to K heads
+        k_new_rope = []
+        for kv_head_idx in range(self.num_key_value_heads):
+            kv_start = kv_head_idx * self.head_dim
+            kv_end = kv_start + self.head_dim
+            k_head = k_new[kv_start:kv_end]
+            k_head_rope = apply_rotary_pos_emb(k_head, current_position, self.head_dim, rope_theta=self.rope_theta)
+            k_new_rope.extend(k_head_rope)
+        k_new = k_new_rope
+        
+        # --- STEP 3: KV CACHE UPDATE ---
+        # We must split k_new/v_new into heads and append to self.k_cache
         
         # Update Cache Loop
         for kv_head_idx in range(self.num_key_value_heads):
@@ -178,7 +203,7 @@ class DecodeSelfAttentionLayer(SelfAttentionLayer):
         
         # --- STEP 7: FFN (SwiGLU) ---
         # Norm
-        x_norm2 = rms_norm_kernel(x_resid, self.norm2_w)
+        x_norm2 = rms_norm_kernel(x_resid, self.norm2_w, eps=self.rms_norm_eps)
         
         # Projections
         gate = mat_vec_mul(self.w_gate, x_norm2)
@@ -235,6 +260,11 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     print(f"Initializing {num_layers} Decode-capable Layers...")
     layers = [DecodeSelfAttentionLayer(layer_idx=i, model_dir=model_dir) for i in range(num_layers)]
     
+    # Print config values for debugging
+    print(f"\nConfiguration from Layer 0:")
+    print(f"  RoPE theta: {layers[0].rope_theta}")
+    print(f"  RMS norm epsilon: {layers[0].rms_norm_eps}")
+    
     # Load Final Norm and Head weights (only once, at the end)
     # Use the method from any layer instance since they all share the same model_path
     print("Loading Model Weights for Head...")
@@ -243,6 +273,7 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     # 2. Tokenize
     input_tokens = tokenizer.encode(prompt_text)
     current_tokens = list(input_tokens)  # Copy
+    print(f"Input tokens: {input_tokens}")
     
     # ==========================================
     # 🟢 STAGE 1: PREFILL (Process all Prompt tokens)
@@ -252,6 +283,13 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     # Embed
     embeddings_seq = embedding_layer.forward(input_tokens)
     
+    # Print embedding output (last token, first 10 values)
+    embeddings_np = embeddings_seq if isinstance(embeddings_seq, np.ndarray) else np.array(embeddings_seq)
+    last_token_embed = embeddings_np[-1]
+    print(f"\nEmbedding (shape={embeddings_np.shape}):")
+    for j in range(10):
+        print(f"  [{j}] = {last_token_embed[j]:.8f}")
+    
     # Convert numpy array to list of lists if needed
     if hasattr(embeddings_seq, 'tolist'):
         embeddings_seq = embeddings_seq.tolist()
@@ -259,14 +297,22 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     # Run all layers (Prefill Mode)
     # This POPULATES the KV CACHE inside each layer
     x_out_seq = embeddings_seq
-    for layer in layers:
+    for i, layer in enumerate(layers):
         x_out_seq = layer.forward(x_out_seq, apply_norm=True)
+        
+        # Print layer output (last token, first 10 values)
+        x_out_np = np.array(x_out_seq) if not isinstance(x_out_seq, np.ndarray) else x_out_seq
+        last_token_out = x_out_np[-1]
+        print(f"\nLayer {i} (shape={x_out_np.shape}):")
+        for j in range(10):
+            print(f"  [{j}] = {last_token_out[j]:.8f}")
     
     # Get the last vector to predict the first NEW token
     last_vector = x_out_seq[-1]
     
-    # Final Norm
-    last_vector = rms_norm_kernel(last_vector, final_norm_w)
+    # Final Norm (use epsilon from first layer)
+    rms_eps = layers[0].rms_norm_eps
+    last_vector = rms_norm_kernel(last_vector, final_norm_w, eps=rms_eps)
     
     # Logits & Sample
     # Optimization: We only need dot product for the last token
@@ -301,7 +347,7 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
             x_out_vec = layer.forward_decode(x_out_vec, apply_norm=True)
         
         # 3. Final Norm
-        x_out_vec = rms_norm_kernel(x_out_vec, final_norm_w)
+        x_out_vec = rms_norm_kernel(x_out_vec, final_norm_w, eps=rms_eps)
         
         # 4. Logits (LM Head)
         # Hardware: Large Matrix-Vector Multiply

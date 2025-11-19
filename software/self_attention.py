@@ -61,6 +61,9 @@ def mat_vec_mul(matrix, vector):
     - Systolic array architecture for efficiency
     """
     result = []
+    # first make sure the cols are the same as the vector
+    if len(matrix[0]) != len(vector):
+        raise ValueError(f"Matrix columns ({len(matrix[0])}) do not match vector length ({len(vector)})")
     for row in matrix:
         result.append(vec_dot(row, vector))
     return result
@@ -143,6 +146,54 @@ def vec_mul(a, b):
     return [x * y for x, y in zip(a, b)]
 
 
+def apply_rotary_pos_emb(q_or_k, position, head_dim, rope_theta=1000000.0):
+    """
+    Hardware: Rotary Position Embedding (RoPE) Unit
+    
+    Applies rotary position embeddings to Q or K vectors.
+    RoPE encodes position information by rotating pairs of dimensions.
+    
+    FPGA Implementation:
+    - Precompute cos/sin LUTs for common positions
+    - Apply rotation: [x, y] -> [x*cos - y*sin, x*sin + y*cos]
+    - Parallel rotation units for each dimension pair
+    
+    Args:
+        q_or_k: Query or Key vector [head_dim]
+        position: Token position in sequence (0-indexed)
+        head_dim: Dimension of each attention head
+        rope_theta: Base frequency (model-specific, default 1M for Qwen2.5)
+        
+    Returns:
+        Rotated vector [head_dim]
+    """
+    result = list(q_or_k)  # Make a copy
+    
+    # Process pairs of dimensions
+    for i in range(0, head_dim, 2):
+        # Calculate frequency for this dimension pair
+        # freq = 1.0 / (rope_theta ^ (2i / head_dim))
+        # i is the pair index (0, 2, 4, ...), so we use i//2 for the exponent
+        pair_idx = i // 2
+        freq = 1.0 / (rope_theta ** (2.0 * pair_idx / head_dim))
+        
+        # Angle for this position
+        angle = position * freq
+        
+        # Precompute cos and sin
+        cos_val = math.cos(angle)
+        sin_val = math.sin(angle)
+        
+        # Apply 2D rotation to the pair (i, i+1)
+        x = q_or_k[i]
+        y = q_or_k[i + 1]
+        
+        result[i] = x * cos_val - y * sin_val
+        result[i + 1] = x * sin_val + y * cos_val
+    
+    return result
+
+
 # ==========================================
 # 🎯 SELF-ATTENTION MODULE
 # ==========================================
@@ -183,6 +234,8 @@ class SelfAttentionLayer:
         self.num_key_value_heads = self.config.get("num_key_value_heads")  # 2 (K, V heads)
         self.head_dim = self.hidden_size // self.num_attention_heads  # 64
         self.layer_idx = layer_idx
+        self.rope_theta = self.config.get("rope_theta", 1000000.0)  # Default to 1000000.0 if not found
+        self.rms_norm_eps = self.config.get("rms_norm_eps", 1e-6)  # RMS norm epsilon
         
         # Calculate Grouped Query Attention parameters
         # Each KV head services multiple Q heads
@@ -194,6 +247,7 @@ class SelfAttentionLayer:
         print(f"Num Key-Value Heads: {self.num_key_value_heads}")
         print(f"Head Dimension: {self.head_dim}")
         print(f"Queries per KV head (GQA): {self.num_queries_per_kv}")
+        print(f"RoPE Theta: {self.rope_theta}")
         
         # Load model weights
         print(f"Loading weights from {model_path}...")
@@ -204,8 +258,7 @@ class SelfAttentionLayer:
         prefix = f"model.layers.{layer_idx}"
         
         # Helper function to extract and convert weights to list of lists
-        def get_weight_matrix(key_name, weight_type="self_attn"):
-            
+        def get_weight_matrix(key_name, weight_type="self_attn", transpose=False):
             """
             Extracts weight matrix and converts to Python list of lists.
             PyTorch Linear weights are stored as [Out_Features, In_Features].
@@ -215,8 +268,12 @@ class SelfAttentionLayer:
                 raise KeyError(f"Weight key '{full_key}' not found in model!")
             
             tensor = state_dict[full_key]
-            # Convert to numpy first, then to list of lists
+            # Convert to numpy - ensure float32
             numpy_array = tensor.detach().float().numpy()
+            
+            if transpose:
+                numpy_array = numpy_array.T
+            
             return numpy_array.tolist()
         
         # Load projection matrices
@@ -226,26 +283,39 @@ class SelfAttentionLayer:
         # O_proj: [hidden_size, hidden_size] = [896, 896]
         
         print(f"Loading Q projection weights...")
-        self.w_q = get_weight_matrix("q_proj")
+        self.w_q = get_weight_matrix("q_proj", transpose=False)
+        print(f"  w_q shape: [{len(self.w_q)}][{len(self.w_q[0])}]")
         
         print(f"Loading K projection weights...")
-        self.w_k = get_weight_matrix("k_proj")
+        self.w_k = get_weight_matrix("k_proj", transpose=False)
+        print(f"  w_k shape: [{len(self.w_k)}][{len(self.w_k[0])}]")
         
         print(f"Loading V projection weights...")
-        self.w_v = get_weight_matrix("v_proj")
+        self.w_v = get_weight_matrix("v_proj", transpose=False)
+        print(f"  w_v shape: [{len(self.w_v)}][{len(self.w_v[0])}]")
         
         print(f"Loading Output projection weights...")
-        self.w_o = get_weight_matrix("o_proj")
+        self.w_o = get_weight_matrix("o_proj", transpose=False)
+        print(f"  w_o shape: [{len(self.w_o)}][{len(self.w_o[0])}]")
 
         print(f"Loading FFN weights...")
-        self.w_gate = get_weight_matrix("gate_proj", weight_type="mlp")
-        self.w_up = get_weight_matrix("up_proj", weight_type="mlp")
-        self.w_down = get_weight_matrix("down_proj", weight_type="mlp")
+        self.w_gate = get_weight_matrix("gate_proj", weight_type="mlp", transpose=False)
+        self.w_up = get_weight_matrix("up_proj", weight_type="mlp", transpose=False)
+        self.w_down = get_weight_matrix("down_proj", weight_type="mlp", transpose=False)
         
         # Norm Weights (1D Lists)
-        self.norm1_w = get_weight_matrix("input_layernorm", weight_type="")
-        self.norm2_w = get_weight_matrix("post_attention_layernorm", weight_type="")
-        print(f"Loaded norm weights (norm1_w and norm2_w)")
+        # Load norm weights carefully - they should be 1D
+        norm1_key = f"{prefix}.input_layernorm.weight"
+        norm2_key = f"{prefix}.post_attention_layernorm.weight"
+        
+        norm1_tensor = state_dict[norm1_key].detach().float().numpy()
+        norm2_tensor = state_dict[norm2_key].detach().float().numpy()
+        
+        # Flatten to 1D if needed
+        self.norm1_w = norm1_tensor.flatten().tolist()
+        self.norm2_w = norm2_tensor.flatten().tolist()
+        
+        print(f"Loaded norm weights: norm1 shape={len(self.norm1_w)}, norm2 shape={len(self.norm2_w)}")
         
         # Clean up
         del state_dict
@@ -286,7 +356,8 @@ class SelfAttentionLayer:
         # --- STEP 1: PRE-ATTENTION NORMALIZATION ---
         if apply_norm and self.norm1_w is not None:
             print("Step 1: Applying RMS Normalization...")
-            x_norm = [rms_norm_kernel(token, self.norm1_w) for token in x_seq]
+            x_norm = [rms_norm_kernel(token, self.norm1_w, eps=self.rms_norm_eps) for token in x_seq]
+            print(f"  After norm (last token, first 10): {x_norm[-1][:10]}")
         else:
             print("Step 1: Skipping normalization")
             x_norm = x_seq
@@ -298,6 +369,14 @@ class SelfAttentionLayer:
         # Each token gets projected to full hidden_size dimension
         Q_flat = [mat_vec_mul(self.w_q, token) for token in x_norm]
         
+        # DEBUG: Manual computation for first output element
+        if self.layer_idx == 0:
+            manual_q0 = sum(self.w_q[0][j] * x_norm[-1][j] for j in range(len(x_norm[-1])))
+            print(f"  [DEBUG] Manual Q[0] for last token: {manual_q0}")
+            print(f"  [DEBUG] mat_vec_mul Q[0] for last token: {Q_flat[-1][0]}")
+            print(f"  [DEBUG] w_q[0][0:3]: {self.w_q[0][0:3]}")
+            print(f"  [DEBUG] x_norm[-1][0:3]: {x_norm[-1][0:3]}")
+        
         # K, V projections: [Seq_Len][num_kv_heads * head_dim]
         # Smaller dimension due to Grouped Query Attention
         K_flat = [mat_vec_mul(self.w_k, token) for token in x_norm]
@@ -306,6 +385,43 @@ class SelfAttentionLayer:
         print(f"  Q shape: [{seq_len}][{len(Q_flat[0])}]")
         print(f"  K shape: [{seq_len}][{len(K_flat[0])}]")
         print(f"  V shape: [{seq_len}][{len(V_flat[0])}]")
+        print(f"  After Q proj (last token, first 10): {Q_flat[-1][:10]}")
+        print(f"  After K proj (last token, first 10): {K_flat[-1][:10]}")
+        
+        # --- STEP 2.3: APPLY ROTARY POSITION EMBEDDINGS ---
+        print("Step 2.3: Applying RoPE to Q and K...")
+        
+        # Apply RoPE to each head separately
+        # For Q: we have num_attention_heads heads
+        # For K: we have num_key_value_heads heads
+        
+        # Apply RoPE to Q heads
+        Q_rope = []
+        for t in range(seq_len):
+            q_token = []
+            for q_head_idx in range(self.num_attention_heads):
+                q_start = q_head_idx * self.head_dim
+                q_end = q_start + self.head_dim
+                q_head = Q_flat[t][q_start:q_end]
+                # Apply RoPE with position t
+                q_head_rope = apply_rotary_pos_emb(q_head, t, self.head_dim, rope_theta=self.rope_theta)
+                q_token.extend(q_head_rope)
+            Q_rope.append(q_token)
+        Q_flat = Q_rope
+        
+        # Apply RoPE to K heads
+        K_rope = []
+        for t in range(seq_len):
+            k_token = []
+            for kv_head_idx in range(self.num_key_value_heads):
+                kv_start = kv_head_idx * self.head_dim
+                kv_end = kv_start + self.head_dim
+                k_head = K_flat[t][kv_start:kv_end]
+                # Apply RoPE with position t
+                k_head_rope = apply_rotary_pos_emb(k_head, t, self.head_dim, rope_theta=self.rope_theta)
+                k_token.extend(k_head_rope)
+            K_rope.append(k_token)
+        K_flat = K_rope
         
         # --- STEP 2.5: STORE KV CACHE ---
         # Organize K and V by KV head and store in cache
@@ -403,7 +519,7 @@ class SelfAttentionLayer:
         print("Step 6: FFN (SwiGLU) block...")
         
         # 1. Norm
-        x_norm2 = [rms_norm_kernel(token, self.norm2_w) for token in x_resid]
+        x_norm2 = [rms_norm_kernel(token, self.norm2_w, eps=self.rms_norm_eps) for token in x_resid]
         
         # 2. Gate & Up Projections
         gate_out = [mat_vec_mul(self.w_gate, token) for token in x_norm2]
@@ -531,10 +647,12 @@ if __name__ == "__main__":
     # now predict the next token
     max_val = -float('inf')
     max_id = -1
-    for i, val in enumerate(last_token_vector):
+    for i, val in enumerate(logits):
         if val > max_val:
             max_val = val
             max_id = i
     
     print(f"Next token: {max_id}")
+    decoded_token = tokenizer.decoder.get(max_id, f"<unk:{max_id}>")
+    print(f"Next token text: '{decoded_token}'")
     print()

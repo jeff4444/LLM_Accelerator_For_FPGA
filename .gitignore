@@ -32,7 +32,10 @@ Thumbs.db
 *.egg-info/
 dist/
 build/
+*.npy
 
 # some notes
 FPGA_DESIGN_NOTES.md
+model_inspection_outputs/
+*.log
 

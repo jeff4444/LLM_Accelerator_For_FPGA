@@ -111,6 +111,38 @@ def rms_norm_kernel(x, weight, eps=1e-6):
     return [val * inv_rms * w for val, w in zip(x, weight)]
 
 
+def silu_kernel(x):
+    """
+    Hardware: SiLU (Sigmoid Linear Unit) Activation
+    SiLU(x) = x * sigmoid(x)
+    
+    FPGA Implementation:
+    - Sigmoid: LUT or CORDIC algorithm
+    - Element-wise multiplication
+    """
+    def sigmoid(val):
+        # Numerical stability: clip to prevent overflow
+        if val > 10:
+            return 1.0
+        if val < -10:
+            return 0.0
+        return 1.0 / (1.0 + math.exp(-val))
+    
+    return [val * sigmoid(val) for val in x]
+
+
+def vec_mul(a, b):
+    """
+    Hardware: Parallel Multiplier Array
+    Element-wise multiplication: c[i] = a[i] * b[i]
+    
+    FPGA Implementation:
+    - N parallel floating-point multipliers
+    - Single cycle latency with pipelining
+    """
+    return [x * y for x, y in zip(a, b)]
+
+
 # ==========================================
 # 🎯 SELF-ATTENTION MODULE
 # ==========================================
@@ -168,15 +200,16 @@ class SelfAttentionLayer:
         state_dict = load_file(model_path)
         
         # Weight key prefix for this layer
-        prefix = f"model.layers.{layer_idx}.self_attn"
+        prefix = f"model.layers.{layer_idx}"
         
         # Helper function to extract and convert weights to list of lists
-        def get_weight_matrix(key_name):
+        def get_weight_matrix(key_name, weight_type="self_attn"):
+            
             """
             Extracts weight matrix and converts to Python list of lists.
             PyTorch Linear weights are stored as [Out_Features, In_Features].
             """
-            full_key = f"{prefix}.{key_name}.weight"
+            full_key = f"{prefix}.{weight_type}.{key_name}.weight" if weight_type != "" else f"{prefix}.{key_name}.weight"
             if full_key not in state_dict:
                 raise KeyError(f"Weight key '{full_key}' not found in model!")
             
@@ -202,18 +235,30 @@ class SelfAttentionLayer:
         
         print(f"Loading Output projection weights...")
         self.w_o = get_weight_matrix("o_proj")
+
+        print(f"Loading FFN weights...")
+        self.w_gate = get_weight_matrix("gate_proj", weight_type="mlp")
+        self.w_up = get_weight_matrix("up_proj", weight_type="mlp")
+        self.w_down = get_weight_matrix("down_proj", weight_type="mlp")
         
-        # Load RMS norm weights for pre-attention normalization
-        norm_key = f"model.layers.{layer_idx}.input_layernorm.weight"
-        if norm_key in state_dict:
-            self.norm_weight = state_dict[norm_key].detach().float().numpy().tolist()
-            print(f"Loaded input layernorm weights")
-        else:
-            print(f"Warning: No layernorm weights found at '{norm_key}'")
-            self.norm_weight = None
+        # Norm Weights (1D Lists)
+        self.norm1_w = get_weight_matrix("input_layernorm", weight_type="")
+        self.norm2_w = get_weight_matrix("post_attention_layernorm", weight_type="")
+        print(f"Loaded norm weights (norm1_w and norm2_w)")
+        
+        # Convert Norm & Head
+        self.final_norm_w = state_dict["model.norm.weight"].tolist()
+        # print(state_dict.keys())
+        # self.lm_head_w = state_dict["lm_head.weight"].tolist()
         
         # Clean up
         del state_dict
+        
+        # Initialize KV cache storage
+        # Structure: k_cache[kv_head_idx][seq_pos][head_dim]
+        #            v_cache[kv_head_idx][seq_pos][head_dim]
+        self.k_cache = None  # Will be initialized on first forward pass
+        self.v_cache = None  # Will be initialized on first forward pass
         
         print(f"✓ Self-Attention Layer {layer_idx} initialized successfully\n")
     
@@ -243,9 +288,9 @@ class SelfAttentionLayer:
         print(f"Hidden dimension: {self.hidden_size}")
         
         # --- STEP 1: PRE-ATTENTION NORMALIZATION ---
-        if apply_norm and self.norm_weight is not None:
+        if apply_norm and self.norm1_w is not None:
             print("Step 1: Applying RMS Normalization...")
-            x_norm = [rms_norm_kernel(token, self.norm_weight) for token in x_seq]
+            x_norm = [rms_norm_kernel(token, self.norm1_w) for token in x_seq]
         else:
             print("Step 1: Skipping normalization")
             x_norm = x_seq
@@ -265,6 +310,26 @@ class SelfAttentionLayer:
         print(f"  Q shape: [{seq_len}][{len(Q_flat[0])}]")
         print(f"  K shape: [{seq_len}][{len(K_flat[0])}]")
         print(f"  V shape: [{seq_len}][{len(V_flat[0])}]")
+        
+        # --- STEP 2.5: STORE KV CACHE ---
+        # Organize K and V by KV head and store in cache
+        # Structure: k_cache[kv_head_idx][seq_pos][head_dim]
+        #            v_cache[kv_head_idx][seq_pos][head_dim]
+        self.k_cache = []
+        self.v_cache = []
+        
+        for kv_head_idx in range(self.num_key_value_heads):
+            kv_start = kv_head_idx * self.head_dim
+            kv_end = kv_start + self.head_dim
+            
+            # Extract K and V for this KV head across all sequence positions
+            k_head_cache = [token[kv_start:kv_end] for token in K_flat]
+            v_head_cache = [token[kv_start:kv_end] for token in V_flat]
+            
+            self.k_cache.append(k_head_cache)
+            self.v_cache.append(v_head_cache)
+        
+        print(f"  KV cache stored: {self.num_key_value_heads} heads, {seq_len} positions, {self.head_dim} dims per head")
         
         # --- STEP 3: MULTI-HEAD ATTENTION COMPUTATION ---
         print(f"Step 3: Computing {self.num_attention_heads}-head attention (GQA)...")
@@ -329,11 +394,60 @@ class SelfAttentionLayer:
                 # All heads are concatenated along the hidden dimension
                 for i in range(self.head_dim):
                     attn_output_seq[t_q][q_start + i] = head_context[i]
-                    
-        return attn_output_seq
         
-    def output_projection(self, token):
-        return mat_vec_mul(self.w_o, token)
+        # --- STEP 4: OUTPUT PROJECTION ---
+        print("Step 4: Output projection...")
+        post_attn = [mat_vec_mul(self.w_o, token) for token in attn_output_seq]
+        
+        # --- STEP 5: RESIDUAL CONNECTION ---
+        print("Step 5: Residual connection...")
+        x_resid = [vec_add(x_seq[i], post_attn[i]) for i in range(seq_len)]
+        
+        # --- BLOCK 2: FFN (SwiGLU) ---
+        print("Step 6: FFN (SwiGLU) block...")
+        
+        # 1. Norm
+        x_norm2 = [rms_norm_kernel(token, self.norm2_w) for token in x_resid]
+        
+        # 2. Gate & Up Projections
+        gate_out = [mat_vec_mul(self.w_gate, token) for token in x_norm2]
+        up_out = [mat_vec_mul(self.w_up, token) for token in x_norm2]
+        
+        # 3. Activation (SiLU) & Element-wise Mul
+        # SwiGLU = (SiLU(Gate) * Up)
+        mlp_hidden = []
+        for i in range(seq_len):
+            act_gate = silu_kernel(gate_out[i])
+            mlp_hidden.append(vec_mul(act_gate, up_out[i]))
+        
+        # 4. Down Projection
+        mlp_out = [mat_vec_mul(self.w_down, token) for token in mlp_hidden]
+        
+        # 5. Final Residual
+        final_out = [vec_add(x_resid[i], mlp_out[i]) for i in range(seq_len)]
+        
+        return final_out
+    
+    def get_kv_cache(self):
+        """
+        Retrieve the stored KV cache.
+        
+        Returns:
+            tuple: (k_cache, v_cache) where:
+                - k_cache: List of lists [kv_head_idx][seq_pos][head_dim]
+                - v_cache: List of lists [kv_head_idx][seq_pos][head_dim]
+            Returns (None, None) if cache hasn't been populated yet.
+        """
+        if self.k_cache is None or self.v_cache is None:
+            return None, None
+        return self.k_cache, self.v_cache
+    
+    def clear_kv_cache(self):
+        """
+        Clear the KV cache. Useful for resetting state between different sequences.
+        """
+        self.k_cache = None
+        self.v_cache = None
 
 
 # ==========================================
@@ -400,16 +514,18 @@ if __name__ == "__main__":
     for attention_layer in attention_layers:
         embeddings = attention_layer.forward(embeddings, apply_norm=True)
         
-    last_token = attention_layers[-1].output_projection(embeddings[-1])
+    embeddings = [rms_norm_kernel(token, attention_layers[-1].final_norm_w) for token in embeddings]
+    last_token_vector = embeddings[-1]
+    # logits = mat_vec_mul(attention_layers[-1].lm_head_w, last_token_vector)
+        
     
     # now predict the next token
     max_val = -float('inf')
     max_id = -1
-    for i, val in enumerate(last_token):
+    for i, val in enumerate(last_token_vector):
         if val > max_val:
             max_val = val
             max_id = i
     
     print(f"Next token: {max_id}")
     print()
-

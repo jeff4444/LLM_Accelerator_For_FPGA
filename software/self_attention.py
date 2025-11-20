@@ -160,53 +160,100 @@ def vec_mul(a, b):
     """
     return [x * y for x, y in zip(a, b)]
 
-
 def apply_rotary_pos_emb(q_or_k, position, head_dim, rope_theta=1000000.0):
     """
-    Hardware: Rotary Position Embedding (RoPE) Unit
+    Pure Software implementation of RoPE (recomputing cos/sin on the fly).
     
-    Applies rotary position embeddings to Q or K vectors.
-    RoPE encodes position information by rotating pairs of dimensions.
-    
-    FPGA Implementation:
-    - Precompute cos/sin LUTs for common positions
-    - Apply rotation: [x, y] -> [x*cos - y*sin, x*sin + y*cos]
-    - Parallel rotation units for each dimension pair
+    CRITICAL CHANGE:
+    This uses 'Split-Half' pairing (index i pairs with index i + half_dim).
+    This is required to match the weights of Qwen, Llama, and HuggingFace models.
     
     Args:
         q_or_k: Query or Key vector [head_dim]
         position: Token position in sequence (0-indexed)
         head_dim: Dimension of each attention head
-        rope_theta: Base frequency (model-specific, default 1M for Qwen2.5)
-        
-    Returns:
-        Rotated vector [head_dim]
+        rope_theta: Base frequency
     """
-    result = list(q_or_k)  # Make a copy
-    
-    # Process pairs of dimensions
-    for i in range(0, head_dim, 2):
-        # Calculate frequency for this dimension pair
-        # freq = 1.0 / (rope_theta ^ (2i / head_dim))
-        # i is the pair index (0, 2, 4, ...), so we use i//2 for the exponent
-        pair_idx = i // 2
-        freq = 1.0 / (rope_theta ** (2.0 * pair_idx / head_dim))
-        
-        # Angle for this position
+    result = list(q_or_k) # Create a copy to avoid modifying input in place
+    half_dim = head_dim // 2
+
+    # We iterate 0 to half_dim (e.g., 0 to 31 for size 64)
+    for i in range(half_dim):
+        # 1. Calculate Frequency on the fly
+        # formula: theta ^ (-2i/dim)
+        freq = 1.0 / (rope_theta ** (2 * i / head_dim))
         angle = position * freq
         
-        # Precompute cos and sin
+        # 2. Calculate Trig on the fly
         cos_val = math.cos(angle)
         sin_val = math.sin(angle)
         
-        # Apply 2D rotation to the pair (i, i+1)
-        x = q_or_k[i]
-        y = q_or_k[i + 1]
+        # 3. Identify the Correct Pair (Split-Half Strategy)
+        idx_1 = i
+        idx_2 = i + half_dim
         
-        result[i] = x * cos_val - y * sin_val
-        result[i + 1] = x * sin_val + y * cos_val
-    
+        val_1 = q_or_k[idx_1]
+        val_2 = q_or_k[idx_2]
+        
+        # 4. Apply Rotation Matrix
+        # Corresponds to: (x * cos) + (rotate_half(x) * sin)
+        # Where rotate_half transforms [x1, x2] -> [-x2, x1]
+        
+        # Output 1: x1*cos - x2*sin
+        result[idx_1] = val_1 * cos_val - val_2 * sin_val
+        
+        # Output 2: x1*sin + x2*cos
+        result[idx_2] = val_1 * sin_val + val_2 * cos_val
+        
     return result
+
+# def apply_rotary_pos_emb(q_or_k, position, head_dim, rope_theta=1000000.0):
+#     """
+#     Hardware: Rotary Position Embedding (RoPE) Unit
+    
+#     Applies rotary position embeddings to Q or K vectors.
+#     This implementation uses the standard pair-wise rotation approach, which is mathematically
+#     equivalent to the transformers library's rotate_half approach.
+    
+#     FPGA Implementation:
+#     - Precompute cos/sin LUTs for common positions
+#     - Apply rotation: [x, y] -> [x*cos - y*sin, x*sin + y*cos]
+#     - Parallel rotation units for each dimension pair
+    
+#     Args:
+#         q_or_k: Query or Key vector [head_dim]
+#         position: Token position in sequence (0-indexed)
+#         head_dim: Dimension of each attention head
+#         rope_theta: Base frequency (model-specific, default 1M for Qwen2.5)
+        
+#     Returns:
+#         Rotated vector [head_dim]
+#     """
+#     result = list(q_or_k)  # Make a copy
+    
+#     # Process pairs of dimensions
+#     # Standard RoPE formula: inv_freq = 1.0 / (base ** (i / dim)) where i = 0, 2, 4, ...
+#     # This is equivalent to: 1.0 / (base ** (2 * pair_idx / dim)) where pair_idx = 0, 1, 2, ...
+#     for i in range(0, head_dim, 2):
+#         pair_idx = i // 2
+#         inv_freq = 1.0 / (rope_theta ** (2.0 * pair_idx / head_dim))
+        
+#         # Angle for this position
+#         angle = position * inv_freq
+        
+#         # Precompute cos and sin
+#         cos_val = math.cos(angle)
+#         sin_val = math.sin(angle)
+        
+#         # Apply 2D rotation to the pair (i, i+1)
+#         # Standard rotation matrix: [x, y] -> [x*cos - y*sin, x*sin + y*cos]
+#         x = q_or_k[i]
+#         y = q_or_k[i + 1]
+        
+#         result[i] = x * cos_val - y * sin_val
+#         result[i + 1] = x * sin_val + y * cos_val
+    
+#     return result
 
 
 # ==========================================

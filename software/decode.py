@@ -314,6 +314,30 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     # 🔵 STAGE 2: DECODE LOOP (Token-by-Token)
     # ==========================================
     for i in range(max_new_tokens):
+        # Print KV cache BEFORE processing the new token (to match test_qwen_model.py behavior)
+        print(f"\n=== KV Cache at Decode Iteration {i} ===")
+        for layer_idx, layer in enumerate(layers):
+            if layer.k_cache is not None and layer.v_cache is not None:
+                # Get cache length (same for all heads)
+                seq_len = len(layer.k_cache[0]) if len(layer.k_cache) > 0 else 0
+                num_kv_heads = len(layer.k_cache)
+                head_dim = len(layer.k_cache[0][0]) if seq_len > 0 else 0
+                
+                print(f"Layer {layer_idx}:")
+                print(f"  K cache shape: [{num_kv_heads} heads, {seq_len} tokens, {head_dim} dims]")
+                print(f"  V cache shape: [{num_kv_heads} heads, {seq_len} tokens, {head_dim} dims]")
+                print(f"  K cache length (seq_len): {seq_len}")
+                
+                # Print first few values of the last token's K and V for first 2 heads
+                if seq_len > 0:
+                    last_token_idx = seq_len - 1
+                    for head_idx in range(min(2, num_kv_heads)):
+                        k_head_last = layer.k_cache[head_idx][last_token_idx]
+                        v_head_last = layer.v_cache[head_idx][last_token_idx]
+                        print(f"    Head {head_idx} (last token):")
+                        print(f"      K first 5 values: {[f'{x:.8f}' for x in k_head_last[:5]]}")
+                        print(f"      V first 5 values: {[f'{x:.8f}' for x in v_head_last[:5]]}")
+        
         # 1. Embed ONLY the new token
         # Input is [1] list, output is numpy array [1][Hidden]
         # We extract the single vector [0]
@@ -345,7 +369,7 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
         # 6. Append & Check EOS
         current_tokens.append(next_token_id)
         token_str = tokenizer.decoder.get(next_token_id, f"<unk:{next_token_id}>")
-        print(f"Generated token: {next_token_id} ('{token_str}')")
+        print(f"\nGenerated token: {next_token_id} ('{token_str}')")
         
         # Check for EOS token (Qwen uses 151643 for <|endoftext|>)
         eos_token_id = config.get("eos_token_id", 151643)
@@ -362,7 +386,7 @@ if __name__ == "__main__":
     if os.path.exists(os.path.join(MODEL_DIR, "model.safetensors")):
         # Test with a simple prompt
         prompt = input("Enter a prompt: ")
-        generate(MODEL_DIR, prompt, max_new_tokens=20, temperature=0.0)
+        generate(MODEL_DIR, prompt, max_new_tokens=5, temperature=0.0)
     else:
         print(f"Error: Model not found at {MODEL_DIR}")
 

@@ -14,33 +14,20 @@ try:
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
 except ImportError as e:
-    print("Error: Required packages not installed.")
-    print("Please install: pip install transformers torch")
     print(f"Error: {e}")
     sys.exit(1)
 
 
 def load_model(model_dir):
     """Load the Qwen model and tokenizer from local directory."""
-    print(f"Loading model from: {model_dir}")
-    
     # Check if model directory exists
     if not os.path.exists(model_dir):
         raise FileNotFoundError(f"Model directory not found: {model_dir}")
     
-    # Check for required files
-    required_files = ["config.json", "model.safetensors", "tokenizer.json"]
-    for file in required_files:
-        file_path = os.path.join(model_dir, file)
-        if not os.path.exists(file_path):
-            print(f"Warning: {file} not found in {model_dir}")
-    
     # Load tokenizer
-    print("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     
     # Load model
-    print("Loading model (this may take a moment)...")
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         trust_remote_code=True,
@@ -48,7 +35,6 @@ def load_model(model_dir):
         device_map="auto"  # Automatically handle device placement
     )
     
-    print("✓ Model loaded successfully!")
     return model, tokenizer
 
 
@@ -57,14 +43,6 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
     Inspect intermediate values in the model for comparison with custom implementation.
     Extracts: tokens, embeddings, hidden states, logits, attention weights.
     """
-    print(f"\n{'='*60}")
-    print("INSPECTING MODEL INTERNALS")
-    print(f"{'='*60}")
-    print(f"Prompt: '{prompt}'")
-    print(f"Max new tokens: {max_new_tokens}")
-    print(f"Temperature: {temperature}")
-    print(f"{'='*60}\n")
-    
     device = next(model.parameters()).device
     
     # ==========================================
@@ -78,17 +56,8 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
     seq_length = input_ids.size(1)
     position_ids = torch.arange(seq_length, dtype=torch.long, device=device).unsqueeze(0)
     
-    print("=" * 60)
-    print("1. TOKENIZATION")
-    print("=" * 60)
-    print(f"Input text: '{prompt}'")
+    # Print tokenization result
     print(f"Token IDs: {token_ids}")
-    print(f"Number of tokens: {len(token_ids)}")
-    
-    # Show token strings
-    token_strings = [tokenizer.decode([tid]) for tid in token_ids]
-    print(f"Token strings: {token_strings}")
-    print()
     
     # ==========================================
     # STEP 2: EMBEDDINGS
@@ -98,22 +67,14 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
         embeddings = model.model.embed_tokens(input_ids)
         embedding_vectors = embeddings[0].cpu().numpy()  # [seq_len, hidden_size]
     
-    print("=" * 60)
-    print("2. EMBEDDINGS")
-    print("=" * 60)
+    # Print embedding result
     print(f"Embedding shape: {embedding_vectors.shape}")
-    print(f"Hidden size: {embedding_vectors.shape[1]}")
-    print(f"First token embedding (first 10 values): {embedding_vectors[0][:10]}")
-    print(f"Embedding stats - Mean: {embedding_vectors.mean():.6f}, Std: {embedding_vectors.std():.6f}")
-    print()
+    for j in range(min(10, embedding_vectors.shape[1])):
+        print(f"  [{j}] = {embedding_vectors[-1][j]:.8f}")
     
     # ==========================================
     # STEP 3: HIDDEN STATES & KV CACHE (Layer by Layer)
     # ==========================================
-    print("=" * 60)
-    print("3. HIDDEN STATES & KV CACHE (Through Layers)")
-    print("=" * 60)
-    
     hidden_states = []
     kv_caches = []  # Store KV cache for each layer
     
@@ -131,109 +92,22 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
         # Shape: tuple of [batch_size, seq_len, hidden_size]
         all_hidden_states = outputs.hidden_states
         
-        print(f"Total hidden states (including embedding): {len(all_hidden_states)}")
-        
         # Convert to numpy and store
         for i, h_state in enumerate(all_hidden_states):
             h_state_np = h_state[0].cpu().numpy()  # [seq_len, hidden_size]
             hidden_states.append(h_state_np)
             
-            # Print layer name and first 10 values
-            layer_name = "Embedding" if i == 0 else f"Layer {i-1}"
-            last_token_hidden = h_state_np[-1]  # [hidden_size]
-            
-            print(f"\n{layer_name} (shape={h_state_np.shape}):")
-            for j in range(10):
-                print(f"  [{j}] = {last_token_hidden[j]:.8f}")
-        
-        # Print intermediate values for Layer 0 for debugging
-        if len(all_hidden_states) > 1:
-            print("\n[DEBUG] Layer 0 intermediate values:")
-            layer0 = model.model.layers[0]
-            layer0_input = all_hidden_states[0]  # Embedding output
-            
-            # Apply input layernorm
-            with torch.no_grad():
-                norm_out = layer0.input_layernorm(layer0_input)
-                print(f"  After norm (last token, first 10): {norm_out[0, -1, :10].tolist()}")
+            # Print hidden state after each layer
+            if i > 0:  # Skip embedding (already printed)
+                layer_name = f"Layer {i-1}"
+                last_token_hidden = h_state_np[-1]  # [hidden_size]
                 
-                # Apply Q projection
-                q_out = layer0.self_attn.q_proj(norm_out)
-                print(f"  After Q proj (last token, first 10): {q_out[0, -1, :10].tolist()}")
-                
-                # Apply K projection  
-                k_out = layer0.self_attn.k_proj(norm_out)
-                print(f"  After K proj (last token, first 10): {k_out[0, -1, :10].tolist()}")
-                
-                # Print Q and K weight matrices
-                q_weights = layer0.self_attn.q_proj.weight.data.cpu().numpy()
-                k_weights = layer0.self_attn.k_proj.weight.data.cpu().numpy()
-                print(f"\n  Q weights shape: {q_weights.shape}")
-                print(f"  Q weights stats - Mean: {q_weights.mean():.6f}, Std: {q_weights.std():.6f}, "
-                      f"Min: {q_weights.min():.6f}, Max: {q_weights.max():.6f}")
-                print(f"  Q weights (first 5x5):")
-                print(f"    {q_weights[:5, :5]}")
-                
-                print(f"\n  K weights shape: {k_weights.shape}")
-                print(f"  K weights stats - Mean: {k_weights.mean():.6f}, Std: {k_weights.std():.6f}, "
-                      f"Min: {k_weights.min():.6f}, Max: {k_weights.max():.6f}")
-                print(f"  K weights (first 5x5):")
-                print(f"    {k_weights[:5, :5]}")
-                
-                # Manual computation: norm_out @ q_weights.T (PyTorch Linear does input @ weight.T + bias)
-                norm_out_np = norm_out[0, -1, :].cpu().numpy()  # Last token: [hidden_size]
-                q_out_np = q_out[0, -1, :].cpu().numpy()  # Last token output: [hidden_size]
-                
-                # Check if bias exists
-                if layer0.self_attn.q_proj.bias is not None:
-                    q_bias = layer0.self_attn.q_proj.bias.data.cpu().numpy()
-                    q_out_manual = norm_out_np @ q_weights.T + q_bias
-                    print(f"\n  [VERIFICATION] Manual Q computation (with bias):")
-                else:
-                    q_out_manual = norm_out_np @ q_weights.T
-                    print(f"\n  [VERIFICATION] Manual Q computation (no bias):")
-                
-                print(f"    norm_out shape: {norm_out_np.shape}")
-                print(f"    q_weights shape: {q_weights.shape}")
-                print(f"    q_out_manual shape: {q_out_manual.shape}")
-                print(f"    q_out (PyTorch) shape: {q_out_np.shape}")
-                print(f"    q_out_manual (first 10): {q_out_manual[:10]}")
-                print(f"    q_out (PyTorch, first 10): {q_out_np[:10]}")
-                
-                # Compare values
-                diff = np.abs(q_out_manual - q_out_np)
-                max_diff = np.max(diff)
-                mean_diff = np.mean(diff)
-                print(f"    Max difference: {max_diff:.10f}")
-                print(f"    Mean difference: {mean_diff:.10f}")
-                print(f"    Are they equal (within 1e-6)? {np.allclose(q_out_manual, q_out_np, atol=1e-6)}")
-                
-                # Same for K
-                k_out_np = k_out[0, -1, :].cpu().numpy()
-                if layer0.self_attn.k_proj.bias is not None:
-                    k_bias = layer0.self_attn.k_proj.bias.data.cpu().numpy()
-                    k_out_manual = norm_out_np @ k_weights.T + k_bias
-                    print(f"\n  [VERIFICATION] Manual K computation (with bias):")
-                else:
-                    k_out_manual = norm_out_np @ k_weights.T
-                    print(f"\n  [VERIFICATION] Manual K computation (no bias):")
-                
-                print(f"    k_out_manual shape: {k_out_manual.shape}")
-                print(f"    k_out (PyTorch) shape: {k_out_np.shape}")
-                print(f"    k_out_manual (first 10): {k_out_manual[:10]}")
-                print(f"    k_out (PyTorch, first 10): {k_out_np[:10]}")
-                
-                diff_k = np.abs(k_out_manual - k_out_np)
-                max_diff_k = np.max(diff_k)
-                mean_diff_k = np.mean(diff_k)
-                print(f"    Max difference: {max_diff_k:.10f}")
-                print(f"    Mean difference: {mean_diff_k:.10f}")
-                print(f"    Are they equal (within 1e-6)? {np.allclose(k_out_manual, k_out_np, atol=1e-6)}")
+                print(f"\n{layer_name} (shape={h_state_np.shape}):")
+                for j in range(min(10, len(last_token_hidden))):
+                    print(f"  [{j}] = {last_token_hidden[j]:.8f}")
         
         # Now extract KV cache for each layer by manually computing Q, K, V
         # We'll use the hidden state input to each layer
-        print("\nExtracting KV caches...")
-        
         for i, layer in enumerate(model.model.layers):
             try:
                 # Get the hidden state that goes INTO this layer
@@ -263,24 +137,16 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
                             'k': k_cache_np,
                             'v': v_cache_np
                         })
-                        print(f"Layer {i} KV cache: K shape={k_cache_np.shape}, V shape={v_cache_np.shape}")
                     else:
                         kv_caches.append(None)
-                        print(f"Layer {i}: No K/V projections found")
                 else:
                     kv_caches.append(None)
-                    print(f"Layer {i}: No self_attn module found")
                     
             except Exception as e:
-                print(f"Error extracting KV cache for layer {i}: {e}")
                 kv_caches.append(None)
         
         # Store the final hidden state from outputs for next step
         hidden_state = outputs.last_hidden_state
-    
-    print(f"\nTotal layers processed: {len(hidden_states) - 1}")  # -1 for embedding
-    print(f"Layers with KV cache: {sum(1 for kv in kv_caches if kv is not None)}")
-    print()
     
     # ==========================================
     # STEP 4: FINAL NORM AND LOGITS
@@ -300,33 +166,9 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
         logits = model.lm_head(final_hidden)  # [seq_len, vocab_size]
         logits_np = logits[0].cpu().numpy()
     
-    print("=" * 60)
-    print("4. FINAL NORM & LOGITS")
-    print("=" * 60)
-    print(f"Final hidden state shape: {final_hidden_np.shape}")
-    print(f"Logits shape: {logits_np.shape}")
-    print(f"Logits stats - Mean: {logits_np.mean():.6f}, Std: {logits_np.std():.6f}, "
-          f"Min: {logits_np.min():.6f}, Max: {logits_np.max():.6f}")
-    
-    # Get top-k predictions for last token
-    last_token_logits = logits_np[-1]
-    top_k = 10
-    top_k_indices = np.argsort(last_token_logits)[-top_k:][::-1]
-    top_k_values = last_token_logits[top_k_indices]
-    
-    print(f"\nTop {top_k} predictions for last token:")
-    for idx, (token_id, score) in enumerate(zip(top_k_indices, top_k_values)):
-        token_str = tokenizer.decode([token_id])
-        print(f"  {idx+1}. Token {token_id:6d} ({token_str:20s}): {score:8.4f}")
-    print()
-    
     # ==========================================
     # STEP 5: GENERATION (Token by Token)
     # ==========================================
-    print("=" * 60)
-    print("5. GENERATION (Token-by-Token)")
-    print("=" * 60)
-    
     generated_tokens = []
     generated_logits = []
     generated_embeddings = []
@@ -351,8 +193,7 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
             
             generated_tokens.append(next_token_id)
             token_str = tokenizer.decode([next_token_id])
-            print(f"Step {step+1}: Token {next_token_id:6d} ({token_str:20s}), "
-                  f"logit={next_token_logits[next_token_id].item():8.4f}")
+            print(f"Generated token: {next_token_id} ('{token_str}')")
             
             # Get embedding for this token (for comparison)
             token_embedding = model.model.embed_tokens(torch.tensor([[next_token_id]], device=device))
@@ -360,31 +201,14 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
             
             # Check for EOS
             if next_token_id == tokenizer.eos_token_id:
-                print("  -> EOS token detected")
                 break
             
             # Append to current_ids for next iteration
             current_ids = torch.cat([current_ids, torch.tensor([[next_token_id]], device=device)], dim=1)
     
-    print()
-    
     # ==========================================
     # STEP 6: SUMMARY & SAVE
     # ==========================================
-    print("=" * 60)
-    print("6. SUMMARY")
-    print("=" * 60)
-    print(f"Input tokens: {len(token_ids)}")
-    print(f"Generated tokens: {len(generated_tokens)}")
-    print(f"Total tokens: {len(token_ids) + len(generated_tokens)}")
-    
-    full_text = tokenizer.decode(token_ids + generated_tokens, skip_special_tokens=True)
-    print(f"\nFull generated text:")
-    print("-" * 60)
-    print(full_text)
-    print("-" * 60)
-    print()
-    
     # Save outputs if requested
     if save_outputs:
         output_dir = Path(__file__).parent / "model_inspection_outputs"
@@ -424,9 +248,6 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
         }
         with open(output_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
-        
-        print(f"Saved inspection outputs to: {output_dir}")
-        print()
     
     return {
         "input_token_ids": token_ids,
@@ -446,25 +267,12 @@ def test_generation(model, tokenizer, prompt, max_new_tokens=50, temperature=0.0
     if inspect:
         return inspect_model_internals(model, tokenizer, prompt, max_new_tokens, temperature, save_outputs=True)
     
-    print(f"\n{'='*60}")
-    print("TESTING TEXT GENERATION")
-    print(f"{'='*60}")
-    print(f"Prompt: '{prompt}'")
-    print(f"Max new tokens: {max_new_tokens}")
-    print(f"Temperature: {temperature}")
-    print(f"Top-p: {top_p}")
-    print(f"{'='*60}\n")
-    
     # Tokenize input
     inputs = tokenizer(prompt, return_tensors="pt")
     
     # Move to same device as model
     device = next(model.parameters()).device
     inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    print(f"Input tokens: {inputs['input_ids'].shape[1]}")
-    print(f"Device: {device}")
-    print("\nGenerating...\n")
     
     # Generate
     with torch.no_grad():
@@ -480,18 +288,6 @@ def test_generation(model, tokenizer, prompt, max_new_tokens=50, temperature=0.0
     # Decode output
     generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
     
-    print("Generated text:")
-    print("-" * 60)
-    print(generated_text)
-    print("-" * 60)
-    
-    # Show token breakdown
-    input_tokens = inputs['input_ids'].shape[1]
-    output_tokens = outputs.shape[1]
-    new_tokens = output_tokens - input_tokens
-    
-    print(f"\nToken count: {input_tokens} input + {new_tokens} generated = {output_tokens} total")
-    
     return generated_text
 
 
@@ -502,9 +298,6 @@ def main():
     model_dir = script_dir.parent / "Qwen2.5-0.5B"
     model_dir = str(model_dir.resolve())
     
-    print("Qwen2.5-0.5B Model Test Script")
-    print("="*60)
-    
     # Load model
     try:
         model, tokenizer = load_model(model_dir)
@@ -513,15 +306,10 @@ def main():
         sys.exit(1)
     
     # Ask for prompt and inspection mode
-    print("\n" + "="*60)
-    print("Enter a prompt for the model:")
-    print("="*60)
-    
     try:
         prompt = input("Prompt: ").strip()
         
         if not prompt:
-            print("No prompt provided. Exiting.")
             sys.exit(0)
         
         # Ask if user wants detailed inspection
@@ -532,7 +320,6 @@ def main():
         test_generation(model, tokenizer, prompt, max_new_tokens=50, temperature=0.0, inspect=inspect_mode)
         
     except KeyboardInterrupt:
-        print("\n\nExiting...")
         sys.exit(0)
     except Exception as e:
         print(f"Error: {e}")

@@ -239,7 +239,6 @@ class SelfAttentionLayer:
             raise ValueError("Must provide either (model_path and config_path) or model_dir")
         
         # Load config
-        print(f"Loading config from {config_path}...")
         with open(config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
@@ -256,16 +255,7 @@ class SelfAttentionLayer:
         # Each KV head services multiple Q heads
         self.num_queries_per_kv = self.num_attention_heads // self.num_key_value_heads  # 7
         
-        print(f"\n--- Layer {layer_idx} Configuration ---")
-        print(f"Hidden Size: {self.hidden_size}")
-        print(f"Num Attention Heads (Q): {self.num_attention_heads}")
-        print(f"Num Key-Value Heads: {self.num_key_value_heads}")
-        print(f"Head Dimension: {self.head_dim}")
-        print(f"Queries per KV head (GQA): {self.num_queries_per_kv}")
-        print(f"RoPE Theta: {self.rope_theta}")
-        
         # Load model weights
-        print(f"Loading weights from {model_path}...")
         self.model_path = model_path
         state_dict = load_file(model_path)
         
@@ -313,31 +303,17 @@ class SelfAttentionLayer:
         # V_proj: [num_kv_heads * head_dim, hidden_size] = [128, 896]
         # O_proj: [hidden_size, hidden_size] = [896, 896]
         
-        print(f"Loading Q projection weights...")
         self.w_q = get_weight_matrix("q_proj", transpose=False)
         self.b_q = get_bias_vector("q_proj")
-        print(f"  w_q shape: [{len(self.w_q)}][{len(self.w_q[0])}]")
-        print(f"  b_q shape: {len(self.b_q) if self.b_q else 'None'}")
         
-        print(f"Loading K projection weights...")
         self.w_k = get_weight_matrix("k_proj", transpose=False)
         self.b_k = get_bias_vector("k_proj")
-        print(f"  w_k shape: [{len(self.w_k)}][{len(self.w_k[0])}]")
-        print(f"  b_k shape: {len(self.b_k) if self.b_k else 'None'}")
         
-        print(f"Loading V projection weights...")
         self.w_v = get_weight_matrix("v_proj", transpose=False)
         self.b_v = get_bias_vector("v_proj")
-        print(f"  w_v shape: [{len(self.w_v)}][{len(self.w_v[0])}]")
-        print(f"  b_v shape: {len(self.b_v) if self.b_v else 'None'}")
         
-        print(f"Loading Output projection weights...")
         self.w_o = get_weight_matrix("o_proj", transpose=False)
         self.b_o = get_bias_vector("o_proj")
-        print(f"  w_o shape: [{len(self.w_o)}][{len(self.w_o[0])}]")
-        print(f"  b_o shape: {len(self.b_o) if self.b_o else 'None'}")
-
-        print(f"Loading FFN weights...")
         self.w_gate = get_weight_matrix("gate_proj", weight_type="mlp", transpose=False)
         self.b_gate = get_bias_vector("gate_proj", weight_type="mlp")
         self.w_up = get_weight_matrix("up_proj", weight_type="mlp", transpose=False)
@@ -357,8 +333,6 @@ class SelfAttentionLayer:
         self.norm1_w = norm1_tensor.flatten().tolist()
         self.norm2_w = norm2_tensor.flatten().tolist()
         
-        print(f"Loaded norm weights: norm1 shape={len(self.norm1_w)}, norm2 shape={len(self.norm2_w)}")
-        
         # Clean up
         del state_dict
         
@@ -367,8 +341,6 @@ class SelfAttentionLayer:
         #            v_cache[kv_head_idx][seq_pos][head_dim]
         self.k_cache = None  # Will be initialized on first forward pass
         self.v_cache = None  # Will be initialized on first forward pass
-        
-        print(f"✓ Self-Attention Layer {layer_idx} initialized successfully\n")
     
     
     def forward(self, x_seq, apply_norm=False):
@@ -391,67 +363,23 @@ class SelfAttentionLayer:
         
         seq_len = len(x_seq)
         
-        print(f"\n=== Self-Attention Forward Pass ===")
-        print(f"Input sequence length: {seq_len}")
-        print(f"Hidden dimension: {self.hidden_size}")
-        
         # --- STEP 1: PRE-ATTENTION NORMALIZATION ---
         if apply_norm and self.norm1_w is not None:
-            print("Step 1: Applying RMS Normalization...")
             x_norm = [rms_norm_kernel(token, self.norm1_w, eps=self.rms_norm_eps) for token in x_seq]
-            print(f"  After norm (last token, first 10): {x_norm[-1][:10]}")
         else:
-            print("Step 1: Skipping normalization")
             x_norm = x_seq
         
         # --- STEP 2: Q, K, V PROJECTIONS ---
-        print("Step 2: Computing Q, K, V projections...")
-        
         # Q projection: [Seq_Len][Hidden_Size]
         # Each token gets projected to full hidden_size dimension
         Q_flat = [mat_vec_mul_with_bias(self.w_q, token, self.b_q) for token in x_norm]
-        
-        # DEBUG: Manual computation for first output element
-        if self.layer_idx == 0:
-            manual_q0 = sum(self.w_q[0][j] * x_norm[-1][j] for j in range(len(x_norm[-1])))
-            if self.b_q:
-                manual_q0 += self.b_q[0]
-            print(f"  [DEBUG] Manual Q[0] for last token: {manual_q0}")
-            print(f"  [DEBUG] mat_vec_mul_with_bias Q[0] for last token: {Q_flat[-1][0]}")
-            print(f"  [DEBUG] w_q[0][0:3]: {self.w_q[0][0:3]}")
-            print(f"  [DEBUG] x_norm[-1][0:3]: {x_norm[-1][0:3]}")
-            if self.b_q:
-                print(f"  [DEBUG] b_q[0]: {self.b_q[0]}")
         
         # K, V projections: [Seq_Len][num_kv_heads * head_dim]
         # Smaller dimension due to Grouped Query Attention
         K_flat = [mat_vec_mul_with_bias(self.w_k, token, self.b_k) for token in x_norm]
         V_flat = [mat_vec_mul_with_bias(self.w_v, token, self.b_v) for token in x_norm]
         
-        print(f"  Q shape: [{seq_len}][{len(Q_flat[0])}]")
-        print(f"  K shape: [{seq_len}][{len(K_flat[0])}]")
-        print(f"  V shape: [{seq_len}][{len(V_flat[0])}]")
-        print(f"  After Q proj (last token, first 10): {Q_flat[-1][:10]}")
-        print(f"  After K proj (last token, first 10): {K_flat[-1][:10]}")
-        
-        # Print Q and K weight matrices
-        w_q_array = np.array(self.w_q)
-        w_k_array = np.array(self.w_k)
-        
-        print(f"\n  w_q weights shape: {w_q_array.shape}")
-        print(f"  w_q weights stats - Mean: {w_q_array.mean():.6f}, Std: {w_q_array.std():.6f}, "
-              f"Min: {w_q_array.min():.6f}, Max: {w_q_array.max():.6f}")
-        print(f"  w_q weights (first 5x5):")
-        print(f"    {w_q_array[:5, :5]}")
-        
-        print(f"\n  w_k weights shape: {w_k_array.shape}")
-        print(f"  w_k weights stats - Mean: {w_k_array.mean():.6f}, Std: {w_k_array.std():.6f}, "
-              f"Min: {w_k_array.min():.6f}, Max: {w_k_array.max():.6f}")
-        print(f"  w_k weights (first 5x5):")
-        print(f"    {w_k_array[:5, :5]}")
-        
         # --- STEP 2.3: APPLY ROTARY POSITION EMBEDDINGS ---
-        print("Step 2.3: Applying RoPE to Q and K...")
         
         # Apply RoPE to each head separately
         # For Q: we have num_attention_heads heads
@@ -503,10 +431,7 @@ class SelfAttentionLayer:
             self.k_cache.append(k_head_cache)
             self.v_cache.append(v_head_cache)
         
-        print(f"  KV cache stored: {self.num_key_value_heads} heads, {seq_len} positions, {self.head_dim} dims per head")
-        
         # --- STEP 3: MULTI-HEAD ATTENTION COMPUTATION ---
-        print(f"Step 3: Computing {self.num_attention_heads}-head attention (GQA)...")
         
         # Initialize output container
         attn_output_seq = [[0.0] * self.hidden_size for _ in range(seq_len)]
@@ -570,15 +495,12 @@ class SelfAttentionLayer:
                     attn_output_seq[t_q][q_start + i] = head_context[i]
         
         # --- STEP 4: OUTPUT PROJECTION ---
-        print("Step 4: Output projection...")
         post_attn = [mat_vec_mul_with_bias(self.w_o, token, self.b_o) for token in attn_output_seq]
         
         # --- STEP 5: RESIDUAL CONNECTION ---
-        print("Step 5: Residual connection...")
         x_resid = [vec_add(x_seq[i], post_attn[i]) for i in range(seq_len)]
         
         # --- BLOCK 2: FFN (SwiGLU) ---
-        print("Step 6: FFN (SwiGLU) block...")
         
         # 1. Norm
         x_norm2 = [rms_norm_kernel(token, self.norm2_w, eps=self.rms_norm_eps) for token in x_resid]
@@ -650,52 +572,24 @@ if __name__ == "__main__":
     # Path to model directory
     model_dir = os.path.join(os.path.dirname(__file__), "..", "Qwen2.5-0.5B")
     
-    print("=" * 80)
-    print("SELF-ATTENTION PIPELINE TEST")
-    print("=" * 80)
-    print()
-    
     # --- STEP 1: Initialize Components ---
-    print("STEP 1: Initializing Tokenizer...")
-    print("-" * 80)
     tokenizer = SimpleBPETokenizer(model_dir=model_dir)
-    print(f"✓ Tokenizer ready with {len(tokenizer.encoder)} vocab items\n")
-    
-    print("STEP 2: Initializing Embedding Layer...")
-    print("-" * 80)
     embedding_layer = EmbeddingLayer(model_dir=model_dir)
-    print(f"✓ Embedding layer ready\n")
     
-    print("STEP 3: Initializing Self-Attention Layer (Layer 0)...")
-    print("-" * 80)
     with open(os.path.join(model_dir, "config.json"), "r") as f:
         config = json.load(f)
     attention_layers = [SelfAttentionLayer(layer_idx=i, model_dir=model_dir) for i in range(config.get("num_hidden_layers"))]
-    print(f"✓ Self-attention layer ready\n")
     
     # --- STEP 2: Process Input ---
-    print("STEP 4: Input Processing")
-    print("-" * 80)
     user_input = input("Enter text to process through self-attention: ")
-    print(f"Input: '{user_input}'\n")
     
     # Tokenization
-    print("STEP 5: Tokenization")
-    print("-" * 80)
     token_ids = tokenizer.encode(user_input)
-    print(f"Token IDs: {token_ids}")
-    print(f"Num tokens: {len(token_ids)}\n")
     
     # Embedding
-    print("STEP 6: Embedding Lookup")
-    print("-" * 80)
     embeddings = embedding_layer.forward(token_ids)
-    print(f"Embeddings shape: {embeddings.shape}")
-    print(f"(Sequence: {embeddings.shape[0]}, Hidden: {embeddings.shape[1]})\n")
     
     # Self-Attention
-    print("STEP 7: Self-Attention Forward Pass")
-    print("-" * 80)
     for attention_layer in attention_layers:
         embeddings = attention_layer.forward(embeddings, apply_norm=True)
         
@@ -714,7 +608,4 @@ if __name__ == "__main__":
             max_val = val
             max_id = i
     
-    print(f"Next token: {max_id}")
     decoded_token = tokenizer.decoder.get(max_id, f"<unk:{max_id}>")
-    print(f"Next token text: '{decoded_token}'")
-    print()

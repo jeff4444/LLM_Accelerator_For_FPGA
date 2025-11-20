@@ -51,7 +51,6 @@ class SimpleBPETokenizer:
             parts = line.strip().split()
             if len(parts) != 2:
                 # Skip malformed lines (though there shouldn't be any)
-                print(f"Warning: Malformed line: {line}")
                 continue
             
             # Store as tuple for hashing
@@ -150,10 +149,7 @@ class SimpleBPETokenizer:
             for token in bpe_tokens:
                 if token in self.encoder:
                     tokens_ids.append(self.encoder[token])
-                else:
-                    # Handle unknown tokens (usually mapped to an <unk> ID)
-                    # Qwen doesn't have unk_token, so we'll print a warning
-                    print(f"Warning: Token '{token}' not found in vocab. Skipping.")
+                # Skip unknown tokens silently
 
         return tokens_ids
 
@@ -182,25 +178,13 @@ if __name__ == "__main__":
     model_dir = os.path.join(os.path.dirname(__file__), "..", "Qwen2.5-0.5B")
     
     # 1. Initialize (Loads the JSON and TXT files)
-    print(f"Loading tokenizer from: {model_dir}")
     tokenizer = SimpleBPETokenizer(model_dir=model_dir)
-
-    print("--- Initialization Complete ---")
-    print(f"Loaded {len(tokenizer.encoder)} vocab items.")
-    print(f"Loaded {len(tokenizer.bpe_ranks)} merge rules.")
-    print("-" * 50)
 
     # 2. Test Input String
     user_input = input("Enter a string: ")
-    print(f"Input String: '{user_input}'")
 
     # 3. Run the Pipeline
     output_ids = tokenizer.encode(user_input)
 
-    # 4. Show Result
-    print(f"Output Tokens (IDs): {output_ids}")
-    print(f"Number of tokens: {len(output_ids)}")
-    
-    # 5. Test decode
+    # 4. Test decode
     decoded = tokenizer.decode(output_ids)
-    print(f"Decoded back: '{decoded}'")

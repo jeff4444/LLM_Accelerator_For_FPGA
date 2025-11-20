@@ -240,9 +240,6 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     Returns:
         List of token IDs (prompt + generated tokens)
     """
-    print(f"\n=== STARTING GENERATION ===")
-    print(f"Prompt: '{prompt_text}'")
-    
     # 1. Initialize
     tokenizer = SimpleBPETokenizer(model_dir=model_dir)
     embedding_layer = EmbeddingLayer(model_dir=model_dir)
@@ -257,29 +254,20 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
         num_layers = config.get("num_hidden_layers", 24)
     
     # Initialize our NEW Decode-capable layers
-    print(f"Initializing {num_layers} Decode-capable Layers...")
     layers = [DecodeSelfAttentionLayer(layer_idx=i, model_dir=model_dir) for i in range(num_layers)]
-    
-    # Print config values for debugging
-    print(f"\nConfiguration from Layer 0:")
-    print(f"  RoPE theta: {layers[0].rope_theta}")
-    print(f"  RMS norm epsilon: {layers[0].rms_norm_eps}")
     
     # Load Final Norm and Head weights (only once, at the end)
     # Use the method from any layer instance since they all share the same model_path
-    print("Loading Model Weights for Head...")
     final_norm_w, lm_head_w = layers[0].get_lm_head_w_and_final_norm_w()
     
     # 2. Tokenize
     input_tokens = tokenizer.encode(prompt_text)
     current_tokens = list(input_tokens)  # Copy
-    print(f"Input tokens: {input_tokens}")
+    print(f"Token IDs: {input_tokens}")
     
     # ==========================================
     # 🟢 STAGE 1: PREFILL (Process all Prompt tokens)
     # ==========================================
-    print(f"\n[State: PREFILL] Processing {len(input_tokens)} tokens...")
-    
     # Embed
     embeddings_seq = embedding_layer.forward(input_tokens)
     
@@ -287,7 +275,7 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     embeddings_np = embeddings_seq if isinstance(embeddings_seq, np.ndarray) else np.array(embeddings_seq)
     last_token_embed = embeddings_np[-1]
     print(f"\nEmbedding (shape={embeddings_np.shape}):")
-    for j in range(10):
+    for j in range(min(10, len(last_token_embed))):
         print(f"  [{j}] = {last_token_embed[j]:.8f}")
     
     # Convert numpy array to list of lists if needed
@@ -304,7 +292,7 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
         x_out_np = np.array(x_out_seq) if not isinstance(x_out_seq, np.ndarray) else x_out_seq
         last_token_out = x_out_np[-1]
         print(f"\nLayer {i} (shape={x_out_np.shape}):")
-        for j in range(10):
+        for j in range(min(10, len(last_token_out))):
             print(f"  [{j}] = {last_token_out[j]:.8f}")
     
     # Get the last vector to predict the first NEW token
@@ -319,14 +307,12 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     logits = mat_vec_mul(lm_head_w, last_vector) 
     next_token_id = sample_next_token(logits, temperature=temperature if temperature > 0 else 0.0)
     
-    print(f"  -> Generated 1st token: {next_token_id} ('{tokenizer.decoder.get(next_token_id)}')")
+    print(f"\nGenerated token: {next_token_id} ('{tokenizer.decoder.get(next_token_id)}')")
     current_tokens.append(next_token_id)
     
     # ==========================================
     # 🔵 STAGE 2: DECODE LOOP (Token-by-Token)
     # ==========================================
-    print(f"\n[State: DECODE] Generating {max_new_tokens} tokens...")
-    
     for i in range(max_new_tokens):
         # 1. Embed ONLY the new token
         # Input is [1] list, output is numpy array [1][Hidden]
@@ -359,23 +345,12 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
         # 6. Append & Check EOS
         current_tokens.append(next_token_id)
         token_str = tokenizer.decoder.get(next_token_id, f"<unk:{next_token_id}>")
-        print(f"  Step {i+1}: {next_token_id} ('{token_str}')")
+        print(f"Generated token: {next_token_id} ('{token_str}')")
         
         # Check for EOS token (Qwen uses 151643 for <|endoftext|>)
         eos_token_id = config.get("eos_token_id", 151643)
         if next_token_id == eos_token_id:
-            print("  -> EOS Token detected.")
             break
-    
-    print("\n=== GENERATION COMPLETE ===")
-    print(f"Full Token Sequence: {current_tokens}")
-    
-    # Decode and print the full text
-    try:
-        decoded_text = tokenizer.decode(current_tokens)
-        print(f"Decoded Text: '{decoded_text}'")
-    except Exception as e:
-        print(f"Warning: Could not decode tokens: {e}")
     
     return current_tokens
 
@@ -388,6 +363,5 @@ if __name__ == "__main__":
         # Test with a simple prompt
         generate(MODEL_DIR, "Hello, how are", max_new_tokens=5, temperature=0.0)
     else:
-        print("Please set MODEL_DIR to your downloaded Qwen model folder.")
-        print(f"Expected path: {MODEL_DIR}")
+        print(f"Error: Model not found at {MODEL_DIR}")
 

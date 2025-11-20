@@ -274,7 +274,6 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     embeddings_seq = embedding_layer.forward(input_tokens)
     
     # Print embedding output (first 10 values only)
-    embeddings_np = embeddings_seq if isinstance(embeddings_seq, np.ndarray) else np.array(embeddings_seq)
     print("\n=== Embedding ===")
     if hasattr(embeddings_seq, 'tolist'):
         embeddings_list = embeddings_seq.tolist()
@@ -309,9 +308,6 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     logits = mat_vec_mul(lm_head_w, last_vector) 
     next_token_id = sample_next_token(logits, temperature=temperature if temperature > 0 else 0.0)
     
-    print("\n=== Attention ===")
-    print(next_token_id)
-    print("=====")
     current_tokens.append(next_token_id)
     
     # ==========================================
@@ -348,10 +344,6 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
         
         # 6. Append & Check EOS
         current_tokens.append(next_token_id)
-        token_str = tokenizer.decoder.get(next_token_id, f"<unk:{next_token_id}>")
-        print("\n=== Decode ===")
-        print(f"{next_token_id} {token_str}")
-        print("====")
         
         # Check for EOS token (Qwen uses 151643 for <|endoftext|>)
         eos_token_id = config.get("eos_token_id", 151643)
@@ -360,8 +352,10 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     
     # Decode the final result
     result_text = tokenizer.decode(current_tokens)
+    
     print("\n=== Result ===")
-    print(result_text)
+    print("Input text: ", prompt_text)
+    print("Generated text: ", result_text)
     print("====")
     
     return current_tokens

@@ -207,54 +207,6 @@ def apply_rotary_pos_emb(q_or_k, position, head_dim, rope_theta=1000000.0):
         
     return result
 
-# def apply_rotary_pos_emb(q_or_k, position, head_dim, rope_theta=1000000.0):
-#     """
-#     Hardware: Rotary Position Embedding (RoPE) Unit
-    
-#     Applies rotary position embeddings to Q or K vectors.
-#     This implementation uses the standard pair-wise rotation approach, which is mathematically
-#     equivalent to the transformers library's rotate_half approach.
-    
-#     FPGA Implementation:
-#     - Precompute cos/sin LUTs for common positions
-#     - Apply rotation: [x, y] -> [x*cos - y*sin, x*sin + y*cos]
-#     - Parallel rotation units for each dimension pair
-    
-#     Args:
-#         q_or_k: Query or Key vector [head_dim]
-#         position: Token position in sequence (0-indexed)
-#         head_dim: Dimension of each attention head
-#         rope_theta: Base frequency (model-specific, default 1M for Qwen2.5)
-        
-#     Returns:
-#         Rotated vector [head_dim]
-#     """
-#     result = list(q_or_k)  # Make a copy
-    
-#     # Process pairs of dimensions
-#     # Standard RoPE formula: inv_freq = 1.0 / (base ** (i / dim)) where i = 0, 2, 4, ...
-#     # This is equivalent to: 1.0 / (base ** (2 * pair_idx / dim)) where pair_idx = 0, 1, 2, ...
-#     for i in range(0, head_dim, 2):
-#         pair_idx = i // 2
-#         inv_freq = 1.0 / (rope_theta ** (2.0 * pair_idx / head_dim))
-        
-#         # Angle for this position
-#         angle = position * inv_freq
-        
-#         # Precompute cos and sin
-#         cos_val = math.cos(angle)
-#         sin_val = math.sin(angle)
-        
-#         # Apply 2D rotation to the pair (i, i+1)
-#         # Standard rotation matrix: [x, y] -> [x*cos - y*sin, x*sin + y*cos]
-#         x = q_or_k[i]
-#         y = q_or_k[i + 1]
-        
-#         result[i] = x * cos_val - y * sin_val
-#         result[i + 1] = x * sin_val + y * cos_val
-    
-#     return result
-
 
 # ==========================================
 # 🎯 SELF-ATTENTION MODULE

@@ -57,7 +57,9 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
     position_ids = torch.arange(seq_length, dtype=torch.long, device=device).unsqueeze(0)
     
     # Print tokenization result
-    print(f"Token IDs: {token_ids}")
+    print("=== Tokenization ===")
+    print(token_ids)
+    print("====")
     
     # ==========================================
     # STEP 2: EMBEDDINGS
@@ -67,10 +69,12 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
         embeddings = model.model.embed_tokens(input_ids)
         embedding_vectors = embeddings[0].cpu().numpy()  # [seq_len, hidden_size]
     
-    # Print embedding result
-    print(f"Embedding shape: {embedding_vectors.shape}")
-    for j in range(min(10, embedding_vectors.shape[1])):
-        print(f"  [{j}] = {embedding_vectors[-1][j]:.8f}")
+    # Print embedding result (first 10 values only)
+    print("\n=== Embedding ===")
+    embedding_list = embedding_vectors.tolist()
+    # Print first 10 values of each token's embedding
+    print([[vec[i] for i in range(min(10, len(vec)))] for vec in embedding_list])
+    print("====")
     
     # ==========================================
     # STEP 3: HIDDEN STATES & KV CACHE (Layer by Layer)
@@ -96,15 +100,6 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
         for i, h_state in enumerate(all_hidden_states):
             h_state_np = h_state[0].cpu().numpy()  # [seq_len, hidden_size]
             hidden_states.append(h_state_np)
-            
-            # Print hidden state after each layer
-            if i > 0:  # Skip embedding (already printed)
-                layer_name = f"Layer {i-1}"
-                last_token_hidden = h_state_np[-1]  # [hidden_size]
-                
-                print(f"\n{layer_name} (shape={h_state_np.shape}):")
-                for j in range(min(10, len(last_token_hidden))):
-                    print(f"  [{j}] = {last_token_hidden[j]:.8f}")
         
         # Now extract KV cache for each layer by manually computing Q, K, V
         # We'll use the hidden state input to each layer
@@ -185,71 +180,6 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
             next_token_logits_np = next_token_logits.cpu().numpy()
             generated_logits.append(next_token_logits_np)
             
-            # Extract and print KV cache for this iteration
-            if outputs.past_key_values is not None:
-                print(f"\n=== KV Cache at Decode Iteration {step} ===")
-                for layer_idx, (k_cache, v_cache) in enumerate(outputs.past_key_values):
-                    # Handle different possible shapes of KV cache
-                    k_tensor = k_cache if isinstance(k_cache, torch.Tensor) else k_cache[0]
-                    v_tensor = v_cache if isinstance(v_cache, torch.Tensor) else v_cache[0]
-                    
-                    k_np = k_tensor.cpu().numpy()
-                    v_np = v_tensor.cpu().numpy()
-                    
-                    print(f"Layer {layer_idx}:")
-                    print(f"  K cache shape: {k_np.shape}")
-                    print(f"  V cache shape: {v_np.shape}")
-                    
-                    # Handle different shape formats
-                    # Common formats:
-                    # - [batch, num_kv_heads, seq_len, head_dim] (4D)
-                    # - [num_kv_heads, seq_len, head_dim] (3D)
-                    # - [seq_len, num_kv_heads * head_dim] (2D, flattened)
-                    
-                    if len(k_np.shape) == 4:
-                        # [batch, num_kv_heads, seq_len, head_dim]
-                        batch_idx = 0
-                        num_kv_heads = k_np.shape[1]
-                        seq_len = k_np.shape[2]
-                        head_dim = k_np.shape[3]
-                        last_token_idx = seq_len - 1
-                        
-                        print(f"  K cache length (seq_len): {seq_len}")
-                        
-                        for head_idx in range(min(2, num_kv_heads)):  # Print first 2 heads
-                            k_head_last = k_np[batch_idx, head_idx, last_token_idx, :]
-                            v_head_last = v_np[batch_idx, head_idx, last_token_idx, :]
-                            print(f"    Head {head_idx} (last token):")
-                            print(f"      K first 5 values: {[f'{x:.8f}' for x in k_head_last[:5]]}")
-                            print(f"      V first 5 values: {[f'{x:.8f}' for x in v_head_last[:5]]}")
-                            
-                    elif len(k_np.shape) == 3:
-                        # [num_kv_heads, seq_len, head_dim]
-                        num_kv_heads = k_np.shape[0]
-                        seq_len = k_np.shape[1]
-                        head_dim = k_np.shape[2]
-                        last_token_idx = seq_len - 1
-                        
-                        print(f"  K cache length (seq_len): {seq_len}")
-                        
-                        for head_idx in range(min(2, num_kv_heads)):  # Print first 2 heads
-                            k_head_last = k_np[head_idx, last_token_idx, :]
-                            v_head_last = v_np[head_idx, last_token_idx, :]
-                            print(f"    Head {head_idx} (last token):")
-                            print(f"      K first 5 values: {[f'{x:.8f}' for x in k_head_last[:5]]}")
-                            print(f"      V first 5 values: {[f'{x:.8f}' for x in v_head_last[:5]]}")
-                            
-                    elif len(k_np.shape) == 2:
-                        # [seq_len, num_kv_heads * head_dim] - flattened format
-                        seq_len = k_np.shape[0]
-                        kv_dim = k_np.shape[1]
-                        print(f"  K cache length (seq_len): {seq_len}")
-                        print(f"  K cache dim (num_kv_heads * head_dim): {kv_dim}")
-                        print(f"    Last token K first 5 values: {[f'{x:.8f}' for x in k_np[seq_len-1, :5]]}")
-                        print(f"    Last token V first 5 values: {[f'{x:.8f}' for x in v_np[seq_len-1, :5]]}")
-                    else:
-                        print(f"  Unexpected KV cache shape: {k_np.shape}")
-            
             # Sample next token
             if temperature > 0:
                 probs = torch.softmax(next_token_logits / temperature, dim=-1)
@@ -259,7 +189,17 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
             
             generated_tokens.append(next_token_id)
             token_str = tokenizer.decode([next_token_id])
-            print(f"\nGenerated token: {next_token_id} ('{token_str}')")
+            
+            # Print first token after prefill as Attention output
+            if step == 0:
+                print("\n=== Attention ===")
+                print(next_token_id)
+                print("=====")
+            elif step == 1:
+                print("\n=== Decode ===")
+                print(f"{next_token_id} {token_str}")
+            else:
+                print(f"{next_token_id} {token_str}")
             
             # Get embedding for this token (for comparison)
             token_embedding = model.model.embed_tokens(torch.tensor([[next_token_id]], device=device))
@@ -274,6 +214,13 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
             
             # For decode stage, only pass the new token
             current_ids = torch.tensor([[next_token_id]], device=device)
+    
+    # Decode the final result
+    full_token_ids = token_ids + generated_tokens
+    result_text = tokenizer.decode(full_token_ids)
+    print("\n=== Result ===")
+    print(result_text)
+    print("====")
     
     # ==========================================
     # STEP 6: SUMMARY & SAVE

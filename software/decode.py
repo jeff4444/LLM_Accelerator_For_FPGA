@@ -263,7 +263,9 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     # 2. Tokenize
     input_tokens = tokenizer.encode(prompt_text)
     current_tokens = list(input_tokens)  # Copy
-    print(f"Token IDs: {input_tokens}")
+    print("=== Tokenization ===")
+    print(input_tokens)
+    print("====")
     
     # ==========================================
     # 🟢 STAGE 1: PREFILL (Process all Prompt tokens)
@@ -271,12 +273,19 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     # Embed
     embeddings_seq = embedding_layer.forward(input_tokens)
     
-    # Print embedding output (last token, first 10 values)
+    # Print embedding output (first 10 values only)
     embeddings_np = embeddings_seq if isinstance(embeddings_seq, np.ndarray) else np.array(embeddings_seq)
-    last_token_embed = embeddings_np[-1]
-    print(f"\nEmbedding (shape={embeddings_np.shape}):")
-    for j in range(min(10, len(last_token_embed))):
-        print(f"  [{j}] = {last_token_embed[j]:.8f}")
+    print("\n=== Embedding ===")
+    if hasattr(embeddings_seq, 'tolist'):
+        embeddings_list = embeddings_seq.tolist()
+    else:
+        embeddings_list = embeddings_seq
+    # Print first 10 values of each token's embedding
+    if isinstance(embeddings_list[0], list):
+        print([[vec[i] for i in range(min(10, len(vec)))] for vec in embeddings_list])
+    else:
+        print([embeddings_list[i] for i in range(min(10, len(embeddings_list)))])
+    print("====")
     
     # Convert numpy array to list of lists if needed
     if hasattr(embeddings_seq, 'tolist'):
@@ -287,13 +296,6 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     x_out_seq = embeddings_seq
     for i, layer in enumerate(layers):
         x_out_seq = layer.forward(x_out_seq, apply_norm=True)
-        
-        # Print layer output (last token, first 10 values)
-        x_out_np = np.array(x_out_seq) if not isinstance(x_out_seq, np.ndarray) else x_out_seq
-        last_token_out = x_out_np[-1]
-        print(f"\nLayer {i} (shape={x_out_np.shape}):")
-        for j in range(min(10, len(last_token_out))):
-            print(f"  [{j}] = {last_token_out[j]:.8f}")
     
     # Get the last vector to predict the first NEW token
     last_vector = x_out_seq[-1]
@@ -307,37 +309,15 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
     logits = mat_vec_mul(lm_head_w, last_vector) 
     next_token_id = sample_next_token(logits, temperature=temperature if temperature > 0 else 0.0)
     
-    print(f"\nGenerated token: {next_token_id} ('{tokenizer.decoder.get(next_token_id)}')")
+    print("\n=== Attention ===")
+    print(next_token_id)
+    print("=====")
     current_tokens.append(next_token_id)
     
     # ==========================================
     # 🔵 STAGE 2: DECODE LOOP (Token-by-Token)
     # ==========================================
     for i in range(max_new_tokens):
-        # Print KV cache BEFORE processing the new token (to match test_qwen_model.py behavior)
-        print(f"\n=== KV Cache at Decode Iteration {i} ===")
-        for layer_idx, layer in enumerate(layers):
-            if layer.k_cache is not None and layer.v_cache is not None:
-                # Get cache length (same for all heads)
-                seq_len = len(layer.k_cache[0]) if len(layer.k_cache) > 0 else 0
-                num_kv_heads = len(layer.k_cache)
-                head_dim = len(layer.k_cache[0][0]) if seq_len > 0 else 0
-                
-                print(f"Layer {layer_idx}:")
-                print(f"  K cache shape: [{num_kv_heads} heads, {seq_len} tokens, {head_dim} dims]")
-                print(f"  V cache shape: [{num_kv_heads} heads, {seq_len} tokens, {head_dim} dims]")
-                print(f"  K cache length (seq_len): {seq_len}")
-                
-                # Print first few values of the last token's K and V for first 2 heads
-                if seq_len > 0:
-                    last_token_idx = seq_len - 1
-                    for head_idx in range(min(2, num_kv_heads)):
-                        k_head_last = layer.k_cache[head_idx][last_token_idx]
-                        v_head_last = layer.v_cache[head_idx][last_token_idx]
-                        print(f"    Head {head_idx} (last token):")
-                        print(f"      K first 5 values: {[f'{x:.8f}' for x in k_head_last[:5]]}")
-                        print(f"      V first 5 values: {[f'{x:.8f}' for x in v_head_last[:5]]}")
-        
         # 1. Embed ONLY the new token
         # Input is [1] list, output is numpy array [1][Hidden]
         # We extract the single vector [0]
@@ -369,12 +349,20 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
         # 6. Append & Check EOS
         current_tokens.append(next_token_id)
         token_str = tokenizer.decoder.get(next_token_id, f"<unk:{next_token_id}>")
-        print(f"\nGenerated token: {next_token_id} ('{token_str}')")
+        print("\n=== Decode ===")
+        print(f"{next_token_id} {token_str}")
+        print("====")
         
         # Check for EOS token (Qwen uses 151643 for <|endoftext|>)
         eos_token_id = config.get("eos_token_id", 151643)
         if next_token_id == eos_token_id:
             break
+    
+    # Decode the final result
+    result_text = tokenizer.decode(current_tokens)
+    print("\n=== Result ===")
+    print(result_text)
+    print("====")
     
     return current_tokens
 
@@ -383,10 +371,13 @@ if __name__ == "__main__":
     # Point this to your actual model directory
     MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "Qwen2.5-0.5B")
     
-    if os.path.exists(os.path.join(MODEL_DIR, "model.safetensors")):
+    try:
+        if not os.path.exists(os.path.join(MODEL_DIR, "model.safetensors")):
+            raise FileNotFoundError(f"Model not found at {MODEL_DIR}")
+        
         # Test with a simple prompt
         prompt = input("Enter a prompt: ")
         generate(MODEL_DIR, prompt, max_new_tokens=5, temperature=0.0)
-    else:
-        print(f"Error: Model not found at {MODEL_DIR}")
+    except Exception as e:
+        print(f"Error: {e}")
 

@@ -6,7 +6,7 @@ import numpy as np
 
 # Import your existing hardware primitives and layer
 from self_attention import (
-    vec_dot, vec_add, vec_scale, mat_vec_mul, 
+    vec_dot, vec_add, vec_scale, mat_vec_mul, mat_vec_mul_with_bias,
     softmax_kernel, rms_norm_kernel, silu_kernel, vec_mul,
     apply_rotary_pos_emb,
     SelfAttentionLayer
@@ -99,9 +99,9 @@ class DecodeSelfAttentionLayer(SelfAttentionLayer):
         # --- STEP 2: CALCULATE Q, K, V FOR NEW TOKEN ---
         # Hardware: Matrix-Vector Multiplication
         # Input is 1 vector. Weights are matrices.
-        q_new = mat_vec_mul(self.w_q, x_norm)  # [Hidden]
-        k_new = mat_vec_mul(self.w_k, x_norm)   # [KV_Heads * Head_Dim]
-        v_new = mat_vec_mul(self.w_v, x_norm)   # [KV_Heads * Head_Dim]
+        q_new = mat_vec_mul_with_bias(self.w_q, x_norm, self.b_q)  # [Hidden]
+        k_new = mat_vec_mul_with_bias(self.w_k, x_norm, self.b_k)   # [KV_Heads * Head_Dim]
+        v_new = mat_vec_mul_with_bias(self.w_v, x_norm, self.b_v)   # [KV_Heads * Head_Dim]
         
         # --- STEP 2.5: APPLY ROTARY POSITION EMBEDDINGS ---
         # Position = current cache length (this is the new token's position)
@@ -196,7 +196,7 @@ class DecodeSelfAttentionLayer(SelfAttentionLayer):
                 attn_output[q_start + i] = head_context[i]
         
         # --- STEP 5: OUTPUT PROJECTION ---
-        post_attn = mat_vec_mul(self.w_o, attn_output)
+        post_attn = mat_vec_mul_with_bias(self.w_o, attn_output, self.b_o)
         
         # --- STEP 6: RESIDUAL 1 ---
         x_resid = vec_add(x_token_embedding, post_attn)
@@ -206,15 +206,15 @@ class DecodeSelfAttentionLayer(SelfAttentionLayer):
         x_norm2 = rms_norm_kernel(x_resid, self.norm2_w, eps=self.rms_norm_eps)
         
         # Projections
-        gate = mat_vec_mul(self.w_gate, x_norm2)
-        up = mat_vec_mul(self.w_up, x_norm2)
+        gate = mat_vec_mul_with_bias(self.w_gate, x_norm2, self.b_gate)
+        up = mat_vec_mul_with_bias(self.w_up, x_norm2, self.b_up)
         
         # Activation
         act_gate = silu_kernel(gate)
         mlp_hidden = vec_mul(act_gate, up)
         
         # Down Projection
-        mlp_out = mat_vec_mul(self.w_down, mlp_hidden)
+        mlp_out = mat_vec_mul_with_bias(self.w_down, mlp_hidden, self.b_down)
         
         # Final Residual
         final_out = vec_add(x_resid, mlp_out)
@@ -361,7 +361,8 @@ if __name__ == "__main__":
     
     if os.path.exists(os.path.join(MODEL_DIR, "model.safetensors")):
         # Test with a simple prompt
-        generate(MODEL_DIR, "Hello, how are", max_new_tokens=5, temperature=0.0)
+        prompt = input("Enter a prompt: ")
+        generate(MODEL_DIR, prompt, max_new_tokens=20, temperature=0.0)
     else:
         print(f"Error: Model not found at {MODEL_DIR}")
 

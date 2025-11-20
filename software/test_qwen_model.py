@@ -164,6 +164,71 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
                 # Apply K projection  
                 k_out = layer0.self_attn.k_proj(norm_out)
                 print(f"  After K proj (last token, first 10): {k_out[0, -1, :10].tolist()}")
+                
+                # Print Q and K weight matrices
+                q_weights = layer0.self_attn.q_proj.weight.data.cpu().numpy()
+                k_weights = layer0.self_attn.k_proj.weight.data.cpu().numpy()
+                print(f"\n  Q weights shape: {q_weights.shape}")
+                print(f"  Q weights stats - Mean: {q_weights.mean():.6f}, Std: {q_weights.std():.6f}, "
+                      f"Min: {q_weights.min():.6f}, Max: {q_weights.max():.6f}")
+                print(f"  Q weights (first 5x5):")
+                print(f"    {q_weights[:5, :5]}")
+                
+                print(f"\n  K weights shape: {k_weights.shape}")
+                print(f"  K weights stats - Mean: {k_weights.mean():.6f}, Std: {k_weights.std():.6f}, "
+                      f"Min: {k_weights.min():.6f}, Max: {k_weights.max():.6f}")
+                print(f"  K weights (first 5x5):")
+                print(f"    {k_weights[:5, :5]}")
+                
+                # Manual computation: norm_out @ q_weights.T (PyTorch Linear does input @ weight.T + bias)
+                norm_out_np = norm_out[0, -1, :].cpu().numpy()  # Last token: [hidden_size]
+                q_out_np = q_out[0, -1, :].cpu().numpy()  # Last token output: [hidden_size]
+                
+                # Check if bias exists
+                if layer0.self_attn.q_proj.bias is not None:
+                    q_bias = layer0.self_attn.q_proj.bias.data.cpu().numpy()
+                    q_out_manual = norm_out_np @ q_weights.T + q_bias
+                    print(f"\n  [VERIFICATION] Manual Q computation (with bias):")
+                else:
+                    q_out_manual = norm_out_np @ q_weights.T
+                    print(f"\n  [VERIFICATION] Manual Q computation (no bias):")
+                
+                print(f"    norm_out shape: {norm_out_np.shape}")
+                print(f"    q_weights shape: {q_weights.shape}")
+                print(f"    q_out_manual shape: {q_out_manual.shape}")
+                print(f"    q_out (PyTorch) shape: {q_out_np.shape}")
+                print(f"    q_out_manual (first 10): {q_out_manual[:10]}")
+                print(f"    q_out (PyTorch, first 10): {q_out_np[:10]}")
+                
+                # Compare values
+                diff = np.abs(q_out_manual - q_out_np)
+                max_diff = np.max(diff)
+                mean_diff = np.mean(diff)
+                print(f"    Max difference: {max_diff:.10f}")
+                print(f"    Mean difference: {mean_diff:.10f}")
+                print(f"    Are they equal (within 1e-6)? {np.allclose(q_out_manual, q_out_np, atol=1e-6)}")
+                
+                # Same for K
+                k_out_np = k_out[0, -1, :].cpu().numpy()
+                if layer0.self_attn.k_proj.bias is not None:
+                    k_bias = layer0.self_attn.k_proj.bias.data.cpu().numpy()
+                    k_out_manual = norm_out_np @ k_weights.T + k_bias
+                    print(f"\n  [VERIFICATION] Manual K computation (with bias):")
+                else:
+                    k_out_manual = norm_out_np @ k_weights.T
+                    print(f"\n  [VERIFICATION] Manual K computation (no bias):")
+                
+                print(f"    k_out_manual shape: {k_out_manual.shape}")
+                print(f"    k_out (PyTorch) shape: {k_out_np.shape}")
+                print(f"    k_out_manual (first 10): {k_out_manual[:10]}")
+                print(f"    k_out (PyTorch, first 10): {k_out_np[:10]}")
+                
+                diff_k = np.abs(k_out_manual - k_out_np)
+                max_diff_k = np.max(diff_k)
+                mean_diff_k = np.mean(diff_k)
+                print(f"    Max difference: {max_diff_k:.10f}")
+                print(f"    Mean difference: {mean_diff_k:.10f}")
+                print(f"    Are they equal (within 1e-6)? {np.allclose(k_out_manual, k_out_np, atol=1e-6)}")
         
         # Now extract KV cache for each layer by manually computing Q, K, V
         # We'll use the hidden state input to each layer

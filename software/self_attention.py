@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import numpy as np
 
 from safetensors.torch import load_file
 
@@ -66,6 +67,20 @@ def mat_vec_mul(matrix, vector):
         raise ValueError(f"Matrix columns ({len(matrix[0])}) do not match vector length ({len(vector)})")
     for row in matrix:
         result.append(vec_dot(row, vector))
+    return result
+
+
+def mat_vec_mul_with_bias(matrix, vector, bias=None):
+    """
+    Hardware: Matrix-Vector Multiplication Engine with Bias
+    Input: Matrix [Rows][Cols], Vector [Cols], Bias [Rows] (optional)
+    Output: Vector [Rows]
+    
+    Performs: output = matrix @ vector + bias (if bias is provided)
+    """
+    result = mat_vec_mul(matrix, vector)
+    if bias is not None:
+        result = vec_add(result, bias)
     return result
 
 
@@ -276,6 +291,22 @@ class SelfAttentionLayer:
             
             return numpy_array.tolist()
         
+        # Helper function to extract bias vectors
+        def get_bias_vector(key_name, weight_type="self_attn"):
+            """
+            Extracts bias vector and converts to Python list.
+            Returns None if bias doesn't exist (some layers may not have bias).
+            """
+            full_key = f"{prefix}.{weight_type}.{key_name}.bias" if weight_type != "" else f"{prefix}.{key_name}.bias"
+            if full_key not in state_dict:
+                return None
+            
+            tensor = state_dict[full_key]
+            # Convert to numpy - ensure float32
+            numpy_array = tensor.detach().float().numpy()
+            
+            return numpy_array.flatten().tolist()
+        
         # Load projection matrices
         # Q_proj: [hidden_size, hidden_size] = [896, 896]
         # K_proj: [num_kv_heads * head_dim, hidden_size] = [128, 896]
@@ -284,24 +315,35 @@ class SelfAttentionLayer:
         
         print(f"Loading Q projection weights...")
         self.w_q = get_weight_matrix("q_proj", transpose=False)
+        self.b_q = get_bias_vector("q_proj")
         print(f"  w_q shape: [{len(self.w_q)}][{len(self.w_q[0])}]")
+        print(f"  b_q shape: {len(self.b_q) if self.b_q else 'None'}")
         
         print(f"Loading K projection weights...")
         self.w_k = get_weight_matrix("k_proj", transpose=False)
+        self.b_k = get_bias_vector("k_proj")
         print(f"  w_k shape: [{len(self.w_k)}][{len(self.w_k[0])}]")
+        print(f"  b_k shape: {len(self.b_k) if self.b_k else 'None'}")
         
         print(f"Loading V projection weights...")
         self.w_v = get_weight_matrix("v_proj", transpose=False)
+        self.b_v = get_bias_vector("v_proj")
         print(f"  w_v shape: [{len(self.w_v)}][{len(self.w_v[0])}]")
+        print(f"  b_v shape: {len(self.b_v) if self.b_v else 'None'}")
         
         print(f"Loading Output projection weights...")
         self.w_o = get_weight_matrix("o_proj", transpose=False)
+        self.b_o = get_bias_vector("o_proj")
         print(f"  w_o shape: [{len(self.w_o)}][{len(self.w_o[0])}]")
+        print(f"  b_o shape: {len(self.b_o) if self.b_o else 'None'}")
 
         print(f"Loading FFN weights...")
         self.w_gate = get_weight_matrix("gate_proj", weight_type="mlp", transpose=False)
+        self.b_gate = get_bias_vector("gate_proj", weight_type="mlp")
         self.w_up = get_weight_matrix("up_proj", weight_type="mlp", transpose=False)
+        self.b_up = get_bias_vector("up_proj", weight_type="mlp")
         self.w_down = get_weight_matrix("down_proj", weight_type="mlp", transpose=False)
+        self.b_down = get_bias_vector("down_proj", weight_type="mlp")
         
         # Norm Weights (1D Lists)
         # Load norm weights carefully - they should be 1D
@@ -367,26 +409,46 @@ class SelfAttentionLayer:
         
         # Q projection: [Seq_Len][Hidden_Size]
         # Each token gets projected to full hidden_size dimension
-        Q_flat = [mat_vec_mul(self.w_q, token) for token in x_norm]
+        Q_flat = [mat_vec_mul_with_bias(self.w_q, token, self.b_q) for token in x_norm]
         
         # DEBUG: Manual computation for first output element
         if self.layer_idx == 0:
             manual_q0 = sum(self.w_q[0][j] * x_norm[-1][j] for j in range(len(x_norm[-1])))
+            if self.b_q:
+                manual_q0 += self.b_q[0]
             print(f"  [DEBUG] Manual Q[0] for last token: {manual_q0}")
-            print(f"  [DEBUG] mat_vec_mul Q[0] for last token: {Q_flat[-1][0]}")
+            print(f"  [DEBUG] mat_vec_mul_with_bias Q[0] for last token: {Q_flat[-1][0]}")
             print(f"  [DEBUG] w_q[0][0:3]: {self.w_q[0][0:3]}")
             print(f"  [DEBUG] x_norm[-1][0:3]: {x_norm[-1][0:3]}")
+            if self.b_q:
+                print(f"  [DEBUG] b_q[0]: {self.b_q[0]}")
         
         # K, V projections: [Seq_Len][num_kv_heads * head_dim]
         # Smaller dimension due to Grouped Query Attention
-        K_flat = [mat_vec_mul(self.w_k, token) for token in x_norm]
-        V_flat = [mat_vec_mul(self.w_v, token) for token in x_norm]
+        K_flat = [mat_vec_mul_with_bias(self.w_k, token, self.b_k) for token in x_norm]
+        V_flat = [mat_vec_mul_with_bias(self.w_v, token, self.b_v) for token in x_norm]
         
         print(f"  Q shape: [{seq_len}][{len(Q_flat[0])}]")
         print(f"  K shape: [{seq_len}][{len(K_flat[0])}]")
         print(f"  V shape: [{seq_len}][{len(V_flat[0])}]")
         print(f"  After Q proj (last token, first 10): {Q_flat[-1][:10]}")
         print(f"  After K proj (last token, first 10): {K_flat[-1][:10]}")
+        
+        # Print Q and K weight matrices
+        w_q_array = np.array(self.w_q)
+        w_k_array = np.array(self.w_k)
+        
+        print(f"\n  w_q weights shape: {w_q_array.shape}")
+        print(f"  w_q weights stats - Mean: {w_q_array.mean():.6f}, Std: {w_q_array.std():.6f}, "
+              f"Min: {w_q_array.min():.6f}, Max: {w_q_array.max():.6f}")
+        print(f"  w_q weights (first 5x5):")
+        print(f"    {w_q_array[:5, :5]}")
+        
+        print(f"\n  w_k weights shape: {w_k_array.shape}")
+        print(f"  w_k weights stats - Mean: {w_k_array.mean():.6f}, Std: {w_k_array.std():.6f}, "
+              f"Min: {w_k_array.min():.6f}, Max: {w_k_array.max():.6f}")
+        print(f"  w_k weights (first 5x5):")
+        print(f"    {w_k_array[:5, :5]}")
         
         # --- STEP 2.3: APPLY ROTARY POSITION EMBEDDINGS ---
         print("Step 2.3: Applying RoPE to Q and K...")
@@ -509,7 +571,7 @@ class SelfAttentionLayer:
         
         # --- STEP 4: OUTPUT PROJECTION ---
         print("Step 4: Output projection...")
-        post_attn = [mat_vec_mul(self.w_o, token) for token in attn_output_seq]
+        post_attn = [mat_vec_mul_with_bias(self.w_o, token, self.b_o) for token in attn_output_seq]
         
         # --- STEP 5: RESIDUAL CONNECTION ---
         print("Step 5: Residual connection...")
@@ -522,8 +584,8 @@ class SelfAttentionLayer:
         x_norm2 = [rms_norm_kernel(token, self.norm2_w, eps=self.rms_norm_eps) for token in x_resid]
         
         # 2. Gate & Up Projections
-        gate_out = [mat_vec_mul(self.w_gate, token) for token in x_norm2]
-        up_out = [mat_vec_mul(self.w_up, token) for token in x_norm2]
+        gate_out = [mat_vec_mul_with_bias(self.w_gate, token, self.b_gate) for token in x_norm2]
+        up_out = [mat_vec_mul_with_bias(self.w_up, token, self.b_up) for token in x_norm2]
         
         # 3. Activation (SiLU) & Element-wise Mul
         # SwiGLU = (SiLU(Gate) * Up)
@@ -533,7 +595,7 @@ class SelfAttentionLayer:
             mlp_hidden.append(vec_mul(act_gate, up_out[i]))
         
         # 4. Down Projection
-        mlp_out = [mat_vec_mul(self.w_down, token) for token in mlp_hidden]
+        mlp_out = [mat_vec_mul_with_bias(self.w_down, token, self.b_down) for token in mlp_hidden]
         
         # 5. Final Residual
         final_out = [vec_add(x_resid[i], mlp_out[i]) for i in range(seq_len)]

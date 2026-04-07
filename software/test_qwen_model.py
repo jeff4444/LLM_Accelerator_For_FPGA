@@ -9,6 +9,7 @@ import sys
 import json
 import numpy as np
 from pathlib import Path
+import time
 
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -191,15 +192,15 @@ def inspect_model_internals(model, tokenizer, prompt, max_new_tokens=50, tempera
             token_str = tokenizer.decode([next_token_id])
             
             # Print first token after prefill as Attention output
-            if step == 0:
-                print("\n=== Attention ===")
-                print(next_token_id)
-                print("=====")
-            elif step == 1:
-                print("\n=== Decode ===")
-                print(f"{next_token_id} {token_str}")
-            else:
-                print(f"{next_token_id} {token_str}")
+            # if step == 0:
+            #     print("\n=== Attention ===")
+            #     print(next_token_id)
+            #     print("=====")
+            # elif step == 1:
+            #     print("\n=== Decode ===")
+            #     print(f"{next_token_id} {token_str}")
+            # else:
+            #     print(f"{next_token_id} {token_str}")
             
             # Get embedding for this token (for comparison)
             token_embedding = model.model.embed_tokens(torch.tensor([[next_token_id]], device=device))
@@ -333,7 +334,7 @@ def main():
         inspect_mode = inspect_input == 'y'
         
         # Run inference
-        test_generation(model, tokenizer, prompt, max_new_tokens=50, temperature=0.0, inspect=inspect_mode)
+        test_generation(model, tokenizer, prompt, max_new_tokens=10, temperature=0.0, inspect=inspect_mode)
         
     except KeyboardInterrupt:
         sys.exit(0)
@@ -345,5 +346,8 @@ def main():
 
 
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    end_time = time.time()
+    print(f"Time taken: {end_time - start_time} seconds")
 

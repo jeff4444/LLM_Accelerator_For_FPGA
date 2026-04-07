@@ -1,7 +1,6 @@
 import json
 import math
 import os
-import numpy as np
 
 from safetensors.torch import load_file
 

@@ -323,3 +323,7 @@ This is a senior design project. For questions or collaboration, please contact 
 - ✅ End-to-end text generation working
 - ✅ Validation against HuggingFace complete
 - 🚧 Next: Begin RTL design and hardware implementation
+
+
+MIRO BOARD
+https://miro.com/app/board/uXjVJ7_TDcE=/

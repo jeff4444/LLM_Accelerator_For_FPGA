@@ -1,8 +1,7 @@
 import math
-import sys
 import os
 import random
-import numpy as np
+import time
 
 # Import your existing hardware primitives and layer
 from self_attention import (
@@ -364,14 +363,17 @@ def generate(model_dir, prompt_text, max_new_tokens=10, temperature=0.7, num_lay
 if __name__ == "__main__":
     # Point this to your actual model directory
     MODEL_DIR = os.path.join(os.path.dirname(__file__), "..", "Qwen2.5-0.5B")
-    
+    start_time = time.time()
     try:
         if not os.path.exists(os.path.join(MODEL_DIR, "model.safetensors")):
             raise FileNotFoundError(f"Model not found at {MODEL_DIR}")
         
         # Test with a simple prompt
         prompt = input("Enter a prompt: ")
-        generate(MODEL_DIR, prompt, max_new_tokens=5, temperature=0.0)
+        
+        generate(MODEL_DIR, prompt, max_new_tokens=10, temperature=0.0)
+        end_time = time.time()
+        print(f"Time taken: {end_time - start_time} seconds")
     except Exception as e:
         print(f"Error: {e}")
 
